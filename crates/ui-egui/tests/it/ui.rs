@@ -1420,6 +1420,21 @@ fn the_home_tab_has_the_document_tabs_height_and_gap() {
     }
 }
 
+/// The mode bar's Menu is a square icon button like Info, Save and Print at the bar's other end,
+/// and still opens the app menu.
+#[test]
+fn the_menu_button_matches_the_mode_bar_icon_buttons_and_opens_the_menu() {
+    let mut h = harness(|app| {
+        app.open_bytes("menu.pdf", None, FIXTURE.to_vec()).unwrap();
+    });
+    let (menu, print) = (h.get_by_label("Menu").rect(), h.get_by_label_contains("Print (").rect());
+    assert_eq!(menu.size(), print.size(), "Menu {menu:?} is the size of Print {print:?}");
+    assert_eq!(menu.center().y, print.center().y, "Menu {menu:?} shares Print's centre line {print:?}");
+    h.get_by_label("Menu").click();
+    h.run_steps(3);
+    h.get_by_label("File ⏵");
+}
+
 /// Presses the named tab, drags it to `to` in a few steps and, unless `release` is false, lets go.
 fn drag_named_tab(h: &mut Harness<'static, PdfCraftApp>, name: &str, to: egui::Pos2, release: bool) {
     let from = h.get_by_role_and_label(egui::accesskit::Role::Tab, name).rect().center();

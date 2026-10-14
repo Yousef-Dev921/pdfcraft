@@ -521,7 +521,9 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
         .exact_size(48.0)
         .frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(10, 0)).stroke(Stroke::new(1.0, t.divider)))
         .show(ui, |ui| {
-            ui.horizontal_centered(|ui| {
+            // As tall as the mode tabs from the start, so Menu and the divider share the centre
+            // line of the tabs, the search field and the buttons at the far end.
+            ui.allocate_ui_with_layout(vec2(ui.available_width(), 48.0), Layout::left_to_right(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 main_menu(app, ui);
                 ui.add_space(6.0);
@@ -572,9 +574,10 @@ pub(crate) fn scroll_menu(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     egui::ScrollArea::vertical().max_height(height).auto_shrink([true, true]).show(ui, add);
 }
 
+/// The app menu: a square icon button, like Info, Save and Print at the bar's other end.
 fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
-    let resp = widgets::ghost_button(ui, "panel-left", tl!("Menu"));
+    let resp = icons::button(ui, "menu", 32.0, false, tl!("Menu"));
     egui::Popup::menu(&resp).show(|ui| {
         scroll_menu(ui, |ui| {
             ui.set_min_width(230.0);

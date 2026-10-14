@@ -33,8 +33,11 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     let mac = cfg!(target_os = "macos") && app.integrated_titlebar;
     let left = if mac { MAC_CONTENT_LEFT as i8 } else { 8 };
     let (tab_h, button) = if mac { (MAC_TITLE_BAR - 2.0, 24.0) } else { (TAB_HEIGHT, STRIP_BUTTON) };
+    ui.ctx().data_mut(|d| d.insert_temp::<Option<egui::Rangef>>(egui::Id::new(ACTIVE_TAB_SPAN), None));
+    // No separator line: the mode bar's top edge divides the two, and opens under the active tab.
     egui::Panel::top("tab_strip")
         .exact_size(if mac { MAC_TITLE_BAR } else { TAB_STRIP })
+        .show_separator_line(false)
         .frame(egui::Frame::NONE.fill(t.titlebar).inner_margin(egui::Margin { left, right: 10, top: 0, bottom: 0 }))
         .show(ui, |ui| {
             let full = ui.max_rect();
@@ -62,7 +65,12 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     });
                     ui.add_space(window_controls::SIDE_GAP - 4.0);
                 }
-                if home_tab(ui, &t, tab_h, app.active.is_none() && !app.combine_showing()).clicked() {
+                let home = app.active.is_none() && !app.combine_showing();
+                let response = home_tab(ui, &t, tab_h, home);
+                if home {
+                    mark_active_tab(ui, response.rect);
+                }
+                if response.clicked() {
                     app.active = None;
                     app.combine_tab.focused = false;
                 }
@@ -145,6 +153,9 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                     true,
                                 );
                                 slots.push((i, response.rect));
+                                if app.active == Some(i) {
+                                    mark_active_tab(ui, response.rect);
+                                }
                                 if response.dragged() || response.drag_stopped() {
                                     dragged = Some((i, response.drag_stopped()));
                                 }
@@ -226,6 +237,9 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                     tab_h,
                                     false,
                                 );
+                                if app.combine_showing() {
+                                    mark_active_tab(ui, response.rect);
+                                }
                                 if changed && app.combine_showing() {
                                     response.scroll_to_me(Some(Align::Center));
                                 }
@@ -332,6 +346,18 @@ fn appearance_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     if ui.button(tl!("Appearance settings…")).clicked() {
         app.dialog = Some(Dialog::Preferences);
         ui.close();
+    }
+}
+
+/// Where the active tab meets the mode bar (an `Option<egui::Rangef>` of x, in temp data), written by the
+/// tab strip each frame and read by the mode bar, which opens its top edge there.
+const ACTIVE_TAB_SPAN: &str = "active_tab_span";
+
+/// Records the visible part of the active tab, so the mode bar runs on into it without a line.
+fn mark_active_tab(ui: &egui::Ui, rect: Rect) {
+    let shown = rect.intersect(ui.clip_rect());
+    if shown.width() > 0.0 {
+        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(ACTIVE_TAB_SPAN), Some(shown.x_range())));
     }
 }
 
@@ -517,7 +543,7 @@ fn tab(
 
 pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
-    egui::Panel::top("mode_bar")
+    let bar = egui::Panel::top("mode_bar")
         .exact_size(48.0)
         .frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(10, 0)).stroke(Stroke::new(1.0, t.divider)))
         .show(ui, |ui| {
@@ -565,7 +591,13 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     }
                 });
             });
-        });
+        })
+        .response
+        .rect;
+    // The active tab runs on into the bar: its top edge opens under the tab.
+    if let Some(span) = ui.ctx().data(|d| d.get_temp::<Option<egui::Rangef>>(egui::Id::new(ACTIVE_TAB_SPAN))).flatten() {
+        ui.painter().rect_filled(Rect::from_x_y_ranges(span, bar.top()..=bar.top() + 1.0), 0, t.chrome);
+    }
 }
 
 /// Keep menus usable when their contents are taller than the window.

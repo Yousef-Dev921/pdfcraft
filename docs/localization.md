@@ -44,22 +44,43 @@ The Albanian catalog (`sq.tsv`, interface name **Shqip**) is written in Standard
 
 The Arabic catalog has 2,137 entries in Modern Standard Arabic with Western digits. Counts use the six [CLDR Arabic forms](https://www.unicode.org/cldr/charts/48/supplemental/language_plural_rules.html#ar) (`0`, `1`, `2`, `3–10`, `11–99`, the rest), and dates use the Arabic names of the Gregorian months.
 
-egui joins the letters of an Arabic word and runs them right to left, but it places the words of a line left to right in the order they are written. So catalog entries are written in logical (typing) order, and `i18n` puts each one into display order when the catalog loads (`bidi::display_rtl`): the line reads right to left, Latin words and numbers inside it read left to right, `{name}` placeholders and keyboard shortcuts stay whole, spaces at either end stay where the code concatenates, and a short caption keeps its colon on the right, beside the widget it captions. Lookups (`tl!`, `tr`, `trn`) therefore return display-order text for Arabic; `i18n::fmt` inserts values as they are. The command search matches a query of several Arabic words word by word.
+Arabic catalog entries stay in logical (typing) order, including when inserted into longer
+sentences or exposed to accessibility. The native text layout patch in `vendor/epaint` resolves
+Unicode bidirectional runs before shaping and wraps each paragraph in reading order. Arabic,
+Latin, Western digits and Arabic-Indic digits can share a line; source text is not reversed.
 
-What Arabic does not have yet:
+Fields use the same native layout while editing: pointer hit testing, visual arrows, source
+selections, copying, pasting and IME composition keep logical Unicode offsets. Comments and
+replies use the same layout for editing and display. Long Arabic labels and tooltips wrap from
+the start of the paragraph; truncated labels put the ellipsis at the reading end. The vendor
+regressions in `text_layout::bidi::tests` and `widgets::text_edit::bidi_tests` use the real Arabic
+face from `CRAFT_FONTS_DIR`.
 
-- **The layout is not mirrored.** Panels, menus, toolbars and alignment are as in the left-to-right languages, with Arabic labels in them.
-- **A wrapped paragraph breaks at the wrong end.** A label too long for its line continues on the next line with its *first* words, so wrapped descriptions and tooltips read from the last line up. Single-line labels are right.
-- **Text you type into a field** (search, comments, form values) has joined letters but its words run left to right while you edit it. What is stored is correct.
-- Labels built by joining translated pieces in code (a list such as `A · B · C`) keep the code's left-to-right order.
+Existing Arabic document text prefers a validated complete source font. Uniform full-face
+paragraphs retain their bidi context across wrapped rows, break overwide words at grapheme
+boundaries and keep logical spaces and `/ActualText` through save/reopen. A saved paragraph's
+different CID maps for the same full program remain editable as one source face. Mixed
+contextual font/style ranges still require a uniform paragraph; the reported Noto Sans Arabic
+Type3 fallback is limited to upright Regular source text. Bundled Arabic appearance fallback
+also uses the Regular face; it does not synthesize Arabic bold or italic. A validated complete
+source face retains its actual outlines and available weight. Bold/italic fallback, shaped style
+ranges and arbitrary producer grouping remain incomplete.
 
-These need bidirectional support in the text layout itself, not in the catalog.
+The `full_arabic_source_` edit regressions run with the required approved `CRAFT_FONTS_DIR`
+input. Their complete static default face is built in memory from that input's default
+TrueType outlines and metrics; no font binary or Python build dependency is added. A test
+compares glyphs, positions, clusters and advances with the approved variable face's default
+instance. `PDFCRAFT_TEST_ARABIC_STATIC_FONT` optionally checks an independently instantiated
+static oracle as well; it is not needed for the normal test run.
+
+**The layout is not mirrored.** Panels, menus and toolbar placement still follow the left-to-right
+interface. This is separate from the text layout and editing support above.
 
 Central Kurdish (Sorani, `ckb`) takes the same path: its catalog is written in logical order and `rtl: true` puts every entry into display order at load (`bidi::display_rtl`), so it behaves as Arabic does above and has the same four limits. Counts use the two [CLDR ckb forms](https://www.unicode.org/cldr/charts/48/supplemental/language_plural_rules.html#ckb) (`one`, `other`); Sorani keeps the noun singular after a numeral, so the two `@plural` forms usually read the same. Dates use the Kurdish names of the Gregorian months. The `Arab` face (Noto Sans Arabic) covers the Kurdish-only letters (`ێ ڵ ڕ ۆ ە ڤ ژ چ گ پ`).
 
 Arabic glyphs come from the craft-fonts `Arab` face (Noto Sans Arabic, kept in the web build too). A build without craft-fonts shows Arabic as replacement boxes on the web; on desktop it falls back to one installed font (below). The craft-fonts revision pinned for CI and releases (`.github/workflows/`) has the Arabic face. That revision also holds Noto Sans CJK SC, which `crates/fonts/build.rs` never embeds: `AGENTS.md` §1.1 bars it, so Chinese still has no embedded face of its own (desktop builds fall back to an installed Chinese face, above).
 
-File names and document titles in Arabic or Hebrew are drawn with a craft-fonts `Arab` face when the build input has one; on desktop, a character no embedded face has is drawn with one font already installed on the machine (`PDFCRAFT_SYSTEM_FONTS=0` turns this off). The tab strip, the recent-files list and Properties show such names in display order; other places (bookmarks, comments, search results) have the glyphs but may order mixed-direction text wrongly.
+File names and document titles in Arabic or Hebrew are drawn with a craft-fonts `Arab` face when the build input has one; on desktop, a character no embedded face has is drawn with one font already installed on the machine (`PDFCRAFT_SYSTEM_FONTS=0` turns this off). The native text layout resolves mixed-direction names in tabs, recent files, Properties, bookmarks, comments and search results while preserving logical names for copying and accessibility.
 
 Japanese, Simplified Chinese, French, German and Brazilian Portuguese coverage tests, following PhotoCraft's complete-catalog approach, check every registered command, All tools label and `tl!("literal")` in the UI source. Brazilian Portuguese also checks every key in the union of the bundled catalogs. Simplified Chinese additionally checks direct `i18n::t` calls and multiline literals, plus the About tabs, contributor name modes, sort options, table headers and model columns. Generated history labels, contributor summaries and diagnostics are tested with user-supplied names and error details. Catalog coverage does not guarantee glyph coverage: the release-pinned craft-fonts input currently has no `Hans` face, and the web build embeds only BIZ UDPGothic Regular. Chinese font delivery remains separate work, as discussed in [#112](https://github.com/storytold/pdfcraft/pull/112) and [#140](https://github.com/storytold/pdfcraft/pull/140).
 

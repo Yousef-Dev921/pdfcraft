@@ -27,6 +27,9 @@ mod session;
 use regions::{group_blocks, is_centred, rewrite_styled_block};
 pub use session::TextSession;
 
+#[path = "text_shaped.rs"]
+mod shaped;
+
 /// One line of existing text.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextLine {
@@ -586,7 +589,7 @@ fn union(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
 /// What replacing a line did.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LineEdit {
-    /// `Some(font)` when the line's font couldn't show the new text and Helvetica was used.
+    /// `Some(font)` when the source face could not draw the new text and a fallback was used.
     pub substituted: Option<String>,
 }
 
@@ -1382,8 +1385,9 @@ pub fn text_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditErro
         }
         l.text = crate::bidi::to_logical(&l.text);
     }
-    // Lines of only spaces aren't editable text.
-    lines.retain(|l| !l.text.trim().is_empty());
+    // ActualText is authoritative, including a wrapped row containing only trailing spaces.
+    // Dropping that row would lose the user's logical characters on the next edit.
+    lines.retain(|l| l.actual_text || !l.text.trim().is_empty());
     Ok(lines)
 }
 
@@ -1628,7 +1632,7 @@ fn reading_lines(doc: &Document, page: usize) -> Result<(Vec<TextLine>, bool), E
     for l in lines.iter_mut().filter(|l| l.visual_order && !l.actual_text) {
         l.text = crate::indic::to_logical(&l.text);
     }
-    lines.retain(|l| !l.text.trim().is_empty());
+    lines.retain(|l| l.actual_text || !l.text.trim().is_empty());
     Ok((lines, w.budget.truncated))
 }
 
@@ -2606,7 +2610,47 @@ pub(crate) fn rewrite_block_with_limit(
 }
 
 /// [`rewrite_block_with_limit`] with the page's [`text_lines`], read from `doc` as it is now.
+///
+/// Arabic in a paragraph whose runs differ in size, colour, weight or font (a heading over its
+/// subtitle, a label beside its value) is first written with the source fonts, run by run. When
+/// they cannot draw it (a subset without the new letters or without contextual forms), the
+/// paragraph takes the shaped Arabic fallback, every run keeping its own look, rather than a
+/// face that has no Arabic at all.
 fn rewrite_block_from(
+    doc: &mut Document,
+    page: usize,
+    lines: Vec<TextLine>,
+    block: usize,
+    text: Option<&str>,
+    style: &BlockStyle,
+    max_glyphs: usize,
+) -> Result<LineEdit, EditError> {
+    let blocks = group_blocks(&lines);
+    let fallback = blocks.get(block).filter(|b| {
+        let members: Vec<&TextLine> = b.lines.iter().filter_map(|i| lines.get(*i)).collect();
+        shaped::eligible(&members, text.unwrap_or(&b.editor_text), style)
+    });
+    let Some(b) = fallback.cloned() else {
+        return rewrite_block_source(doc, page, lines, block, text, style, max_glyphs);
+    };
+    // The source path may write fonts before it finds a run it cannot draw.
+    let before = doc.clone();
+    match rewrite_block_source(doc, page, lines.clone(), block, text, style, max_glyphs) {
+        Err(source) => {
+            *doc = before;
+            shaped::rewrite(doc, page, &b, &lines, text.unwrap_or(&b.editor_text), style).map_err(|fallback| match fallback {
+                // The fallback's own refusal names what it cannot keep; otherwise say why the source fonts failed.
+                EditError::Invalid(_) => fallback,
+                _ => source,
+            })
+        }
+        done => done,
+    }
+}
+
+/// [`rewrite_block_from`] with the source fonts (or the up-front Arabic fallback for a uniform
+/// paragraph no complete source face can draw).
+fn rewrite_block_source(
     doc: &mut Document,
     page: usize,
     lines: Vec<TextLine>,
@@ -2641,6 +2685,10 @@ fn rewrite_block_from(
     let upright = members.iter().all(|line| line.upright());
     if !upright && (!style.ranges.is_empty() || style.resource.is_some()) {
         return Err(EditError::Invalid("formatting part of turned text, or choosing a document font for it, isn't supported yet".into()));
+    }
+    let draft = text.unwrap_or(&b.editor_text);
+    if shaped::needs_fallback(doc, &fonts_res, &members, draft, style) {
+        return shaped::rewrite(doc, page, &b, &lines, draft, style);
     }
     let visual_indic = members.iter().any(|line| line.visual_order);
     if upright

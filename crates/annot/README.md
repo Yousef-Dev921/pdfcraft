@@ -9,8 +9,11 @@ Comments (annotations), ISO 32000-2 §12.5. Layer L3, depends on `pdfcraft-cos`,
   line and arrow (`Line` with `/LE`), freehand drawing (`Ink`) and text box (`FreeText`).
 - **Appearance streams** (`appearance::build`) generated from the annotation dictionary, so new
   and restyled comments look the same in every viewer. Highlights multiply (`/BM /Multiply`).
-  Note icons are PdfCraft's own drawings. Text boxes use standard Helvetica (WinAnsi), with
-  line breaking by approximate Helvetica proportions (no font program is bundled). Text it can't
+  Note icons are PdfCraft's own drawings. Text boxes, callouts and Fill & Sign text use standard
+  Helvetica for WinAnsi text. Arabic, Hebrew and Thai use their optional craft-fonts faces with
+  OpenType shaping, bidirectional layout and self-contained Type 3 outlines. ToUnicode and
+  per-line ActualText retain typing order, including marks, ligatures and mixed Latin/digits.
+  Wrapping preserves spaces and breaks long words only at grapheme boundaries. Text it can't
   draw (in a text box, callout, Fill & Sign text, measurement label or dynamic stamp's by-line;
   `appearance::undrawable_text`) is kept as typed and drawn as `?`, and the comment is marked with
   the first such character (`pdfcraft_fonts::UNDRAWN_MARK`) so the engine reports the edit and

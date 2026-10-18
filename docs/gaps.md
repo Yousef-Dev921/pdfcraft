@@ -1,5 +1,6 @@
 # Where PdfCraft falls short of Acrobat Pro
 
+> **Last reviewed:** 2026-10-18 · **Last updated:** 2026-10-18 · **Change:** minor (gaps 3/14: native bidi editing and bounded Arabic source fallback; global layout remains unmirrored; estimates unchanged)
 > **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** minor (gap 6 #3673: Character encoding CJK mapping routes corrected; no readiness re-estimate)
 
 > **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-19 · **Change:** minor (gap 2: composite fonts with `/ToUnicode /Identity-H` read as Unicode, hayro-interpret patch 44; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
@@ -81,6 +82,14 @@ update the numbers.
 
 ### 3. Editing existing text is fragile on real files
 
+- **Arabic progress (2026-10-18):** text fields now keep logical Unicode source offsets while
+  the shared native layout resolves bidi runs, shaping, wrapping, caret movement and selection.
+  Existing upright text with a uniform style can use the reported Noto Sans Arabic fallback
+  when its source subset lacks replacement glyphs; save/reopen regressions retain logical text,
+  the right anchor and neighbouring source runs. This is a bounded fallback, not general Arabic
+  document editing: mixed font/style contextual runs, bold/italic fallback, shaped style ranges,
+  rotated text and arbitrary producer grouping remain open.
+
 - **Fork progress (2026-10-11):** compatible words and subset-font spaces form lines;
   source fonts lacking a space glyph remain reusable; inline editing previews remove source
   glyphs on a clone. Aligned visual rows now form mixed-style regions (including matrix-scaled headings),
@@ -103,11 +112,12 @@ update the numbers.
   baseline is still replaced. Estimates are unchanged.
 
 - **Missing:** robust in-place editing of text PdfCraft didn't write: subset fonts without the
-  needed glyphs, CJK and right-to-left text, rotated text, lists, superscript/subscript, keeping
-  structure tags, find and replace in edit mode; vector and object editing; arrange and align.
+  needed glyphs, general CJK and right-to-left runs beyond the bounded fallback above, rotated
+  text, lists, superscript/subscript, keeping structure tags, find and replace in edit mode;
+  vector and object editing; arrange and align.
 - **Evidence:** `edit.text-edit` is partial (font reused or Helvetica substituted);
-  `edit.rtl-cjk-editing`, `edit.rotated-text-editing`, `edit.keep-tags-on-edit`,
-  `edit.vector-edit`, `edit.edit-object-tool` are planned. Users:
+  `edit.rotated-text-editing`, `edit.keep-tags-on-edit`,
+  `edit.vector-edit`, `edit.edit-object-tool` are planned; `edit.rtl-cjk-editing` is partial. Users:
   [#766](https://github.com/storytold/pdfcraft/issues/766) (editing Arabic text),
   [#844](https://github.com/storytold/pdfcraft/issues/844) (several elements now move together on
   one page, not across pages),
@@ -306,12 +316,22 @@ update the numbers.
 
 ### 14. Arabic not mirrored; no Hindi, Indonesian, Korean
 
-- **Missing:** a right-to-left layout (panels, menus, alignment), bidirectional text in the text
-  layout itself (wrapping, typed text); catalogs for Hindi, Indonesian and Korean (Acrobat ships
+- **Progress (2026-10-18):** Arabic catalogs remain in logical order. The native bidi layout
+  covers labels and wrapped comments, text input, pointer/caret/selection geometry, clipboard,
+  IME composition and accessibility source text. Arabic annotation and form appearances use
+  shaped outlines with logical text retained through save/reopen. Vendor regressions cover
+  mixed scripts, controls, diacritics, fractional DPI and long narrow paragraphs.
+- **Missing:** a mirrored right-to-left interface layout (panels, menus and toolbar placement);
+  catalogs for Hindi, Indonesian and Korean (Acrobat ships
   Korean; it ships Arabic in its Middle East edition; it ships none of Hindi or Indonesian).
   Vietnamese ships as a catalog (`vi`, 100% of the current localizable union) but stays `partial`
   like other non-English languages (no translated help; engine/OS details stay English).
-- **Evidence:** [localization.md](localization.md) §Arabic; `misc.rtl-ui` planned.
+- **Evidence:** [localization.md](localization.md) §Arabic; `misc.rtl-ui` partial;
+  `vendor/epaint/src/text/text_layout/bidi.rs` and
+  `vendor/egui/src/widgets/text_edit/bidi_tests.rs`. PDF regressions:
+  `arabic_text_boxes_callouts_and_typewriter_embed_searchable_appearances_after_reopen`
+  (`crates/annot/src/tests.rs`) and `arabic_field_values_choices_comb_and_password_survive_save_reopen`
+  (`crates/forms/src/tests.rs`). Native release acceptance is a separate gate.
 - **Estimate:** 25–45 h (Arabic RTL 20–35, three catalogs 8–12 plus review). **Doc:**
   [localization-parity.md](localization-parity.md).
 
@@ -401,6 +421,7 @@ update the numbers.
 | 2026-10-15 | minor | Gap 21: the side-by-side view had already shipped; the Compare panel filters text changes and visual differences. Estimate 10–20 h → 8–16 h |
 | 2026-10-20 | minor | Gap 6 #3673: Character encoding accepts Identity-H/V with Adobe CJK collections, or a predefined non-Identity CMap; negative and indirect-reference regressions and a read-only automation test passed after failing before the fix. Per-glyph validation and embedded-font extraction remain separate. Scores and estimates unchanged. |
 | 2026-10-17 | minor | Gap 6: the redaction audit counts a cover over one word of a long line instead of a clean bill (#2662, fixed by #2698). Estimates unchanged. |
+| 2026-10-18 | minor | Gaps 3/14: native logical bidi text input and display, shaped Arabic annotation/form appearances, bounded upright uniform-style source fallback. Global UI mirroring and general Arabic editing remain partial; estimates unchanged. |
 | 2026-10-15 | minor | Gap 12: the text oracle scores reading order as well as word F1, which is a bag of words and cannot see order; the first measurement separated 18 improvements from 6 regressions in a change F1 called unchanged on 26 of 29 files. Estimates unchanged. |
 | 2026-10-14 | minor | M1: raw-deflate fallback preserves decoding-limit errors in strict and tolerant decoding; synthetic filter and COS stream regressions. Estimates unchanged. |
 | 2026-10-15 | patch | Gap 24: record localization and installers as partial (unusable Chinese, Telugu and Arabic; unsigned Linux packages) |

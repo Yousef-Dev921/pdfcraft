@@ -1263,7 +1263,7 @@ pub fn add_annotation(doc: &mut Document, new: &NewAnnotation, meta: &Meta) -> R
             let size = if font_size.is_finite() && *font_size > 0.0 { font_size.clamp(1.0, 400.0) } else { 12.0 };
             let [r, g, b] = style.color.map(|x| x.clamp(0.0, 1.0));
             d.set(b"DA".to_vec(), PdfString::literal(format!("{} {} {} rg /Helv {} Tf", n(r), n(g), n(b), n(size)).into_bytes()));
-            d.set(b"Q".to_vec(), Object::Int(0));
+            d.set(b"Q".to_vec(), Object::Int(if pdfcraft_fonts::appearance_text::paragraph_rtl(&new.contents) { 2 } else { 0 }));
             if let Some(f) = style.fill {
                 d.set(b"C".to_vec(), rgb(f));
             }
@@ -1291,8 +1291,11 @@ pub fn add_annotation(doc: &mut Document, new: &NewAnnotation, meta: &Meta) -> R
     {
         return Err(AnnotError::Undrawable(pdfcraft_fonts::undrawable_message(what, c)));
     }
+    // Build first: unsupported shaping or oversized text must not add a partial annotation.
+    let subtype = String::from_utf8_lossy(d.name(b"Subtype").unwrap_or_default()).into_owned();
+    let stream = build_appearance(doc, &d).ok_or(AnnotError::Unsupported(subtype))?;
     let r = doc.add(Object::Dict(d.clone()));
-    draw_appearance(doc, r)?;
+    apply_appearance(doc, r, &d, stream)?;
     let mut list = annots(doc, page);
     let index = list.len();
     list.push(Object::Ref(r));
@@ -1408,9 +1411,15 @@ fn build_appearance(doc: &Document, d: &Dict) -> Option<Stream> {
 }
 
 /// Store a built appearance on the annotation: the cheap half of [`set_appearance`].
-fn apply_appearance(doc: &mut Document, r: ObjRef, d: &Dict, stream: Stream) -> Result<(), AnnotError> {
+fn apply_appearance(doc: &mut Document, r: ObjRef, d: &Dict, mut stream: Stream) -> Result<(), AnnotError> {
     // Characters the standard fonts can't draw came out as `?`: mark the annotation with the first.
     let missing = appearance::undrawable_text(d).map(|(_, c)| c);
+    if let Some(Object::Dict(resources)) = stream.dict.get_mut(b"Resources")
+        && let Some(Object::Dict(fonts)) = resources.get(b"Font")
+    {
+        let fonts = pdfcraft_fonts::appearance_text::materialize_fonts(doc, fonts);
+        resources.set(b"Font".to_vec(), Object::Dict(fonts));
+    }
     let ap = doc.add(Object::Stream(stream));
     // A copy (a shared /AP is left alone) that keeps unknown entries; the old down and rollover
     // appearances would show the previous look on press or hover, so they go with the old /N.
@@ -1478,8 +1487,28 @@ impl AppearanceCache {
         if self.entries.len() >= 1_000_000 {
             self.clear();
         }
-        if self.bytes.saturating_add(stream.raw.len()) <= Self::MAX_BYTES {
-            self.bytes += stream.raw.len();
+        // Shaped font templates also own compressed glyph/CMap streams. Include them in the
+        // cache budget; none is allocated in the document until a copy is displayed.
+        let font_bytes =
+            stream.dict.get(b"Resources").and_then(Object::as_dict).and_then(|res| res.get(b"Font")).and_then(Object::as_dict).map_or(0, |fonts| {
+                fonts.iter().fold(0usize, |total, (_, font)| {
+                    let Some(font) = font.as_dict() else { return total };
+                    let cmap = match font.get(b"ToUnicode") {
+                        Some(Object::Stream(s)) => s.raw.len(),
+                        _ => 0,
+                    };
+                    let glyphs = font.get(b"CharProcs").and_then(Object::as_dict).map_or(0, |procs| {
+                        procs.iter().fold(0usize, |sum, (_, glyph)| match glyph {
+                            Object::Stream(s) => sum.saturating_add(s.raw.len()),
+                            _ => sum,
+                        })
+                    });
+                    total.saturating_add(cmap).saturating_add(glyphs)
+                })
+            });
+        let bytes = stream.raw.len().saturating_add(font_bytes);
+        if self.bytes.saturating_add(bytes) <= Self::MAX_BYTES {
+            self.bytes += bytes;
             self.entries.insert(r, stream.clone());
         }
         // Else over budget: keep serving the entries already cached instead of growing.
@@ -1567,7 +1596,14 @@ fn rich_text(d: &mut Dict) {
         _ => "left",
     };
     let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
-    let body: String = text.split('\n').map(|line| format!("<p dir=\"ltr\">{}</p>", esc(line.trim_end_matches('\r')))).collect();
+    let body: String = text
+        .split('\n')
+        .map(|line| {
+            let line = line.trim_end_matches('\r');
+            let direction = if pdfcraft_fonts::appearance_text::paragraph_rtl(line) { "rtl" } else { "ltr" };
+            format!("<p dir=\"{direction}\">{}</p>", esc(line))
+        })
+        .collect();
     let style = format!(
         "font-size:{}pt;text-align:{align};color:{hex};font-weight:normal;font-style:normal;font-family:Helvetica;font-stretch:normal",
         n(size)
@@ -1629,7 +1665,8 @@ pub fn delete_annotation(doc: &mut Document, page: usize, index: usize) -> Resul
 /// new text: the wrap width and top edge stay, the height fits the wrapped lines.
 pub fn set_contents(doc: &mut Document, page: usize, index: usize, text: &str, meta: &Meta) -> Result<(), AnnotError> {
     let (_, r) = annot_ref(doc, page, index)?;
-    let free_text = annot_dict(doc, r).name(b"Subtype") == Some(b"FreeText");
+    let before = annot_dict(doc, r);
+    let free_text = before.name(b"Subtype") == Some(b"FreeText");
     doc.update_dict(r, |d| {
         d.set(b"Contents".to_vec(), PdfString::text(text));
         // The rich-text version follows the new plain text (text boxes), or would contradict it.
@@ -1645,9 +1682,13 @@ pub fn set_contents(doc: &mut Document, page: usize, index: usize, text: &str, m
         // text editable (as in Acrobat), so the re-fit ignores the lock. New text is drawn even
         // where the standard fonts can't draw some of it (marked and reported, see
         // `draw_appearance`).
-        match fitted_box(doc, r, text) {
-            Some(rect) => apply_text_box(doc, r, rect, meta, true)?,
-            None => draw_appearance(doc, r)?,
+        let result = match fitted_box(doc, r, text) {
+            Some(rect) => apply_text_box(doc, r, rect, meta, true),
+            None => draw_appearance(doc, r),
+        };
+        if let Err(error) = result {
+            doc.set(r, Object::Dict(before));
+            return Err(error);
         }
     }
     Ok(())
@@ -1679,8 +1720,13 @@ fn fitted_box(doc: &Document, r: ObjRef, text: &str) -> Option<[f64; 4]> {
         let longest = text.lines().map(|l| appearance::text_width(l, size)).fold(0.0, f64::max);
         (longest + 2.0 * pad + 4.0).clamp(40.0, 300.0)
     };
-    let lines = appearance::wrap(text, size, (w - 2.0 * pad).max(1.0)).len().max(1) as f64;
-    Some([x0, top - lines * size * 1.2 - 2.0 * pad - 2.0, x0 + w, top])
+    let width = (w - 2.0 * pad).max(1.0);
+    let text_height = if pdfcraft_fonts::appearance_text::has_shaped_text(text) && pdfcraft_fonts::appearance_text::can_shape(text) {
+        pdfcraft_fonts::appearance_text::height(&pdfcraft_fonts::appearance_text::wrap(text, size, width).ok()?, size)
+    } else {
+        appearance::wrap(text, size, width).len().max(1) as f64 * size * 1.2
+    };
+    Some([x0, top - text_height - 2.0 * pad - 2.0, x0 + w, top])
 }
 
 /// Reply to a comment; returns the reply's index in the page's `/Annots`.

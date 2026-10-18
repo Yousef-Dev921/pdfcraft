@@ -1416,6 +1416,8 @@ fn editor_job(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: f32
         }
         for (range, index) in block.edited_spans(text) {
             let Some(line) = lines.get(index) else { continue };
+            let span = text.get(range).unwrap_or_default();
+            let complex = pdfcraft_fonts::source_shaping::required(span) || pdfcraft_fonts::source_shaping::required(&line.text);
             let mut look = source_look(&line.base_font, line.size, line.color, line.bold, line.italic);
             look.size = line.size;
             if ed.look.family != ed.look0.family || ed.family_chosen {
@@ -1436,15 +1438,31 @@ fn editor_job(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: f32
             let mut font = editor_font(&look, (look.size as f32 * scale).clamp(1.0, 300.0));
             let original_face =
                 ed.look.family == ed.look0.family && !ed.family_chosen && ed.look.bold == ed.look0.bold && ed.look.italic == ed.look0.italic;
-            let embedded = original_face && ed.fonts.contains_key(&line.font);
+            // A PDF subset can hold isolated letters while lacking the OpenType tables needed
+            // to join them. Use the document face only when it can shape the actual draft.
+            let embedded = original_face
+                && ed.fonts.get(&line.font).is_some_and(|name| {
+                    !complex
+                        || ui.fonts(|fonts| {
+                            fonts
+                                .definitions()
+                                .font_data
+                                .get(name)
+                                .is_some_and(|data| pdfcraft_fonts::source_shaping::shape(data.font.as_ref(), span).is_ok())
+                        })
+                });
             if embedded && let Some(name) = ed.fonts.get(&line.font) {
                 font.family = FontFamily::Name(name.clone().into());
             }
             let native_width = ui.fonts_mut(|f| f.layout_no_wrap(line.text.clone(), font.clone(), Color32::BLACK).size().x);
             let target_width = ((line.rect[2] - line.rect[0]) * look.size / line.size.max(0.01)) as f32 * scale;
-            let spacing = if original_face { (target_width - native_width) / line.text.chars().count().saturating_sub(1).max(1) as f32 } else { 0.0 };
+            let spacing = if original_face && !complex {
+                (target_width - native_width) / line.text.chars().count().saturating_sub(1).max(1) as f32
+            } else {
+                0.0
+            };
             job.append(
-                text.get(range).unwrap_or_default(),
+                span,
                 0.0,
                 egui::TextFormat {
                     font_id: font,
@@ -1513,8 +1531,12 @@ fn editor_galley(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: 
         sources.windows(2).map(|r| (r[0].0 - r[1].0).abs()).rfind(|v| *v > 0.0).unwrap_or(fallback)
     };
     let g = Arc::make_mut(&mut galley);
+    let bidirectional = g.rows.iter().any(|row| row.bidi.is_some());
+    let changed_draft = ed.has_changes();
     let mut bounds = Rect::NOTHING;
     let mut meshes = Rect::NOTHING;
+    let mut previous_ink_bottom = f32::NEG_INFINITY;
+    let mut previous_baseline = f32::NEG_INFINITY;
     for (index, placed) in g.rows.iter_mut().enumerate() {
         let (last_baseline, last_rect) = sources.last().copied().unwrap_or((first_baseline, first_rect));
         let (baseline, source_rect) = sources
@@ -1525,10 +1547,16 @@ fn editor_galley(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: 
         let ratio = if changed_size { ed.look.size / ed.look0.size.max(0.01) } else { 1.0 };
         let ascent = (source_rect[3] - sources.get(index).map_or(last_baseline, |s| s.0)) as f32 * scale * ratio as f32;
         let descent = (sources.get(index).map_or(last_baseline, |s| s.0) - source_rect[1]) as f32 * scale * ratio as f32;
-        let base_y = (block.rect[3] - baseline) as f32 * scale;
+        let mut base_y = (block.rect[3] - baseline) as f32 * scale;
         let row = Arc::make_mut(&mut placed.row);
         placed.pos.y = base_y - ascent;
-        placed.pos.x = if centered { (width - row.size.x) / 2.0 } else { (source_rect[0] - block.rect[0]) as f32 * scale };
+        placed.pos.x = if centered {
+            (width - row.size.x) / 2.0
+        } else if row.bidi.as_ref().is_some_and(|bidi| bidi.rtl) {
+            (source_rect[2] - block.rect[0]) as f32 * scale - row.size.x
+        } else {
+            (source_rect[0] - block.rect[0]) as f32 * scale
+        };
         for glyph in &mut row.glyphs {
             let dy = ascent - glyph.pos.y;
             glyph.pos.y = ascent;
@@ -1543,12 +1571,61 @@ fn editor_galley(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: 
         }
         row.size.y = (ascent + descent).max(1.0);
         row.visuals.mesh_bounds = row.visuals.mesh.vertices.iter().fold(Rect::NOTHING, |r, v| r.union(Rect::from_min_max(v.pos, v.pos)));
+        // The first source baseline stays fixed. A changed Arabic draft needs room
+        // for its actual marks, rather than the Latin source face's shorter leading.
+        // An unchanged source paragraph retains every original baseline.
+        if bidirectional && index > 0 && (changed_draft || index >= sources.len()) {
+            base_y = base_y.max(previous_baseline + leading as f32 * scale * ratio as f32);
+            if row.visuals.mesh_bounds.is_finite() {
+                let ink_ascent = ascent - row.visuals.mesh_bounds.top();
+                base_y = base_y.max(previous_ink_bottom + ink_ascent + ed.size * 0.15);
+            }
+            placed.pos.y = base_y - ascent;
+        }
+        previous_baseline = base_y;
+        if row.visuals.mesh_bounds.is_finite() {
+            previous_ink_bottom = row.visuals.mesh_bounds.bottom() + placed.pos.y;
+        }
         bounds = bounds.union(Rect::from_min_size(placed.pos, row.size));
         meshes = meshes.union(row.visuals.mesh_bounds.translate(placed.pos.to_vec2()));
     }
     g.rect = Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(bounds.right().max(0.0), bounds.bottom().max(0.0)));
+    if bidirectional {
+        // A right-anchored draft can grow left of its source, and Arabic marks can
+        // rise above a Latin source ascent. Both extents belong to the editable area.
+        g.rect = g.rect.union(bounds).union(meshes);
+    }
     g.mesh_bounds = meshes;
     galley
+}
+
+/// TextEdit allocates from a zero origin. Move every row with the galley, keeping
+/// glyph meshes local to their row so painting, selection and hit testing agree.
+fn normalized_editor_galley(mut galley: Arc<egui::Galley>) -> Arc<egui::Galley> {
+    let offset = -galley.rect.min.to_vec2();
+    let g = Arc::make_mut(&mut galley);
+    for row in &mut g.rows {
+        row.pos += offset;
+    }
+    g.rect = g.rect.translate(offset);
+    g.mesh_bounds = g.mesh_bounds.translate(offset);
+    galley
+}
+
+fn editor_width(ui: &egui::Ui, ed: &LineEditor, scale: f32, page: Rect) -> f32 {
+    let single_run = ed.source.as_ref().is_some_and(|(block, _)| block.rows.len() == 1 || block.invisible);
+    if !ed.multiline && single_run && !ed.text.contains('\n') && ed.has_changes() {
+        let job = editor_job(ui, ed, &ed.text, scale, f32::INFINITY);
+        let natural = ui.fonts_mut(|f| f.layout_job(job)).size().x;
+        let available = if pdfcraft_fonts::appearance_text::paragraph_rtl(&ed.text) {
+            ed.rect.right() - page.left() - 36.0 * scale
+        } else {
+            page.right() - ed.rect.left() - 36.0 * scale
+        };
+        natural.max(ed.size * 0.4).min(available.max(ed.rect.width()))
+    } else {
+        ed.rect.width().max(1.0)
+    }
 }
 
 /// The inline editor; returns the edit once the text is applied.
@@ -1600,6 +1677,14 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo) -
     let font = editor_font(&ed.look, smallest.map_or(ed.size, |s| (s * scale * 0.5).clamp(1.0, 300.0).min(ed.size)));
     let text_color = color32(ed.look.color);
     let block = ed.block;
+    // Measure source bidi drafts before placing the Area: a negative galley origin
+    // must move the editor left/up, while its source baseline and right edge stay put.
+    let bidi_measurement = (ed.source.is_some() && unicode_bidi::BidiInfo::new(&ed.text, None).has_rtl()).then(|| {
+        let ui = egui::Ui::new(ctx.clone(), egui::Id::new("edit-text-line-measure"), egui::UiBuilder::new().invisible());
+        let width = editor_width(&ui, ed, scale, xf.rect);
+        (width, editor_galley(&ui, ed, &ed.text, scale, width))
+    });
+    let editor_origin = bidi_measurement.as_ref().map_or(ed.rect.min, |(_, galley)| ed.rect.min + galley.rect.min.to_vec2());
     let mut done = None;
     let mut reveal = false;
     let mut look = None;
@@ -1610,7 +1695,7 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo) -
     egui::Area::new(egui::Id::new("edit-text-line"))
         .order(egui::Order::Foreground)
         .fade_in(false)
-        .fixed_pos(Pos2::new(ed.rect.left(), ed.rect.top()))
+        .fixed_pos(editor_origin)
         .constrain_to(viewport)
         .constrain(false)
         .show(ctx, |ui| {
@@ -1619,18 +1704,12 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo) -
             // extent: single rows grow toward the page edge, paragraphs rewrap at their
             // source width, and the visible frame grows/shrinks vertically with their rows.
             // An OCR phrase (several stretched words on one scanned line) also grows rightwards.
-            let single_run = ed.source.as_ref().is_some_and(|(block, _)| block.rows.len() == 1 || block.invisible);
-            let width = if !ed.multiline && single_run && !ed.text.contains('\n') && ed.has_changes() {
-                let job = editor_job(ui, ed, &ed.text, scale, f32::INFINITY);
-                let natural = ui.fonts_mut(|f| f.layout_job(job)).size().x;
-                natural.max(ed.size * 0.4).min((xf.rect.right() - ed.rect.left() - 36.0 * scale).max(ed.rect.width()))
-            } else {
-                ed.rect.width().max(1.0)
-            };
-            ui.set_width(width);
-            let measured = editor_galley(ui, ed, &ed.text, scale, width);
+            let width = bidi_measurement.as_ref().map_or_else(|| editor_width(ui, ed, scale, xf.rect), |(width, _)| *width);
+            let measured = bidi_measurement.as_ref().map_or_else(|| editor_galley(ui, ed, &ed.text, scale, width), |(_, galley)| galley.clone());
+            let input_width = if bidi_measurement.is_some() { measured.rect.width().max(1.0) } else { width };
+            ui.set_width(input_width);
             ed.overflow = ed.has_changes() && (measured.rect.width() > ed.rect.width() + 1.5 || measured.rect.height() > ed.rect.height() + 1.5);
-            let visible = Rect::from_min_size(ed.rect.min, measured.rect.size().max(egui::vec2(1.0, 1.0)));
+            let visible = Rect::from_min_size(editor_origin, measured.rect.size().max(egui::vec2(1.0, 1.0)));
             // Unsupported source programs use an interface fallback whose glyph advances
             // can differ from the PDF's. Keep every visible row inside the growing frame.
             let live = draft_rect.map_or(visible, |bounds| bounds.union(visible));
@@ -1665,7 +1744,13 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo) -
                 let rows = 1;
                 let snapshot = ed.clone();
                 let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
-                    let galley = editor_galley(ui, &snapshot, text.as_str(), scale, wrap_width);
+                    let galley = if bidi_measurement.is_some() {
+                        // Normalization changes the allocated width, not the paragraph's
+                        // wrap budget; reusing that budget prevents a layout feedback loop.
+                        normalized_editor_galley(editor_galley(ui, &snapshot, text.as_str(), scale, width))
+                    } else {
+                        editor_galley(ui, &snapshot, text.as_str(), scale, wrap_width)
+                    };
                     if snapshot.changes_with(text.as_str()) { galley } else { unseen(galley) }
                 };
                 let output = egui::TextEdit::multiline(&mut ed.text)
@@ -1675,7 +1760,7 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo) -
                     .layouter(&mut layouter)
                     .text_color(text_color)
                     .frame(egui::Frame::NONE)
-                    .desired_width(width)
+                    .desired_width(input_width)
                     .desired_rows(rows)
                     .show(ui);
                 if ed.has_changes() {
@@ -1821,6 +1906,88 @@ mod tests {
         ed.choose_family(family);
         ed.applied();
         assert_eq!(ed.style().family, None, "an applied choice is the paragraph's font now");
+    }
+
+    #[test]
+    fn arabic_drafts_keep_the_right_anchor_without_artificial_letter_spacing() {
+        if pdfcraft_fonts::document_arabic_font().is_none() {
+            return;
+        }
+        let (app, mut ed) = preview_app();
+        let doc = app.session.get(app.views[0].id).unwrap();
+        let block = doc.text_blocks(0).remove(0);
+        let expected_right = (block.rect[2] - block.rect[0]) as f32;
+        ed.source = Some((block, doc.text_lines(0)));
+        ed.text = "مرحبا بالعربية 123".into();
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::theme::font_definitions());
+        ctx.run_ui(Default::default(), |ui| {
+            let job = editor_job(ui, &ed, &ed.text, 1.0, 400.0);
+            assert!(job.sections.iter().all(|section| section.format.extra_letter_spacing == 0.0));
+            let galley = editor_galley(ui, &ed, &ed.text, 1.0, 400.0);
+            let row = &galley.rows[0];
+            assert!(row.bidi.as_ref().is_some_and(|bidi| bidi.rtl));
+            assert!((row.pos.x + row.size.x - expected_right).abs() < 0.1);
+        })
+        .drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn vocalized_arabic_editor_keeps_leftward_growth_and_high_marks_inside_its_clip() {
+        if pdfcraft_fonts::document_arabic_font().is_none() {
+            return;
+        }
+        let draft = "سَلَامٌ عَلَيْكُمْ وَرَحْمَةُ اللَّهِ وَبَرَكَاتُهُ ".repeat(2);
+        let expected = draft.clone();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 1500.0)).build_eframe(move |_cc| {
+            let (mut app, mut editor) = preview_app();
+            app.set_option("language", "en").unwrap();
+            let doc = app.session.get(app.views[0].id).unwrap();
+            editor.source = Some((doc.text_blocks(0).remove(0), doc.text_lines(0)));
+            editor.text = draft;
+            // Large, but every row still ends on the page: the editor is cut off where the page is.
+            editor.look.size = 30.0;
+            app.views[0].line_editor = Some(editor);
+            app
+        });
+        h.run_steps(8);
+        if let Ok(dir) = std::env::var("PDFCRAFT_SHOTS") {
+            h.render().unwrap().save(format!("{dir}/vocalized-arabic-source-editor.png")).unwrap();
+        }
+        let text = h
+            .output()
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == expected => Some((shape.clip_rect, text)),
+                _ => None,
+            })
+            .expect("the real TextEdit paints the complete logical draft");
+        let (clip, text) = text;
+        let ink = text.visual_bounding_rect();
+        assert!(clip.expand(0.5).contains_rect(ink), "the TextEdit clip {clip:?} must contain all Arabic ink {ink:?}");
+        assert!(text.galley.rect.expand(0.5).contains_rect(text.galley.mesh_bounds), "the galley includes marks and negative bearings");
+        let mut previous_ink: Option<Rect> = None;
+        for row in &text.galley.rows {
+            assert!(row.pos.is_finite(), "whitespace rows retain usable caret coordinates");
+            if !row.visuals.mesh_bounds.is_finite() {
+                continue;
+            }
+            let ink = row.visuals.mesh_bounds.translate(row.pos.to_vec2());
+            if let Some(above) = previous_ink {
+                assert!(above.bottom() <= ink.top(), "Arabic ink {above:?} and {ink:?} leave room for marks");
+            }
+            previous_ink = Some(ink);
+        }
+        let editor = h.state().views[0].line_editor.as_ref().unwrap();
+        let first = &text.galley.rows[0];
+        assert!((text.pos.x + first.rect().right() - editor.rect.right()).abs() < 0.5, "the first row keeps the source right edge");
+        let (block, lines) = editor.source.as_ref().unwrap();
+        let source_baseline = lines[block.rows[0][0]].baseline()[1];
+        let scale = editor.rect.width() / (editor.source_rect[2] - editor.source_rect[0]);
+        let expected_baseline = editor.rect.top() + (block.rect[3] - source_baseline) as f32 * scale;
+        let baseline = text.pos.y + first.pos.y + first.glyphs[0].pos.y;
+        assert!((baseline - expected_baseline).abs() < 0.5, "growing the editor keeps its first PDF baseline");
     }
 
     #[test]

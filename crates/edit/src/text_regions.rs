@@ -188,11 +188,23 @@ fn starts_list_item(row: &[usize], lines: &[TextLine]) -> bool {
     row.iter().filter_map(|i| lines.get(*i)).map(|l| l.text.trim_start()).find(|t| !t.is_empty()).is_some_and(opens_with_marker)
 }
 
+/// The gap from `prev` to `line` along their baseline, in reading order: to the right of it, or,
+/// when either reads right to left and `line` does not continue to the right, to its left. A
+/// right-to-left row drawn as several runs (Arabic beside a Latin word or number) is one row.
+fn reading_gap(prev: &TextLine, line: &TextLine) -> f64 {
+    let forward = line.frame_rect()[0] - prev.frame_rect()[2];
+    if forward < -prev.size.min(line.size) * 0.2 && (crate::bidi::rtl_base(&prev.text) || crate::bidi::rtl_base(&line.text)) {
+        prev.frame_rect()[0] - line.frame_rect()[2]
+    } else {
+        forward
+    }
+}
+
 fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
     let mut rows: Vec<Vec<usize>> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         let joins = rows.last().and_then(|r| r.last()).and_then(|i| lines.get(*i)).is_some_and(|prev| {
-            let gap = line.frame_rect()[0] - prev.frame_rect()[2];
+            let gap = reading_gap(prev, line);
             // OCR words (invisible text over a scan) join only across a word space: a wider gap
             // is a table cell or a tab stop, which a rewrite would close up.
             let scanned = !mixed || (invisible(prev) == invisible(line) && (!invisible(line) || gap < prev.size.max(line.size) * 0.6));
@@ -294,7 +306,7 @@ fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
             if let Some(prev) = block.lines.last().filter(|i| row.contains(i)).and_then(|i| lines.get(*i))
                 && !row_text.ends_with(char::is_whitespace)
                 && !line.text.starts_with(char::is_whitespace)
-                && line.frame_rect()[0] - prev.frame_rect()[2] > line.size * 0.12
+                && reading_gap(prev, line) > line.size * 0.12
             {
                 row_text.push(' ');
                 block.editor_text.push(' ');
@@ -320,16 +332,8 @@ fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
     blocks
 }
 
-/// Shape in the source or an explicitly registered matching full face. Never use interface fonts.
-fn shape_source(
-    doc: &Document,
-    fonts: &Dict,
-    name: &str,
-    text: &str,
-) -> Result<Option<(Vec<u8>, pdfcraft_fonts::source_shaping::ShapedRun, String)>, EditError> {
-    if !pdfcraft_fonts::source_shaping::required(text) {
-        return Ok(None);
-    }
+/// Find the complete source program. Never use an interface fallback as a document font.
+fn source_face(doc: &Document, fonts: &Dict, name: &str, text: &str) -> Result<(std::sync::Arc<Vec<u8>>, String), EditError> {
     let source =
         fonts.get(name.as_bytes()).and_then(|f| doc.dict(f)).ok_or_else(|| EditError::Invalid("the shaped text has no font resource".into()))?;
     let family = Metrics::from_dict(doc, &source).base_font;
@@ -343,12 +347,34 @@ fn shape_source(
     for font in candidates {
         if let Some(bytes) = pdfcraft_fonts::pdf::embedded_sfnt(doc, &font)
             && pdfcraft_fonts::embedding::covers(&bytes, text)
-            && let Ok(shaped) = pdfcraft_fonts::source_shaping::shape(&bytes, text)
+            && pdfcraft_fonts::embedding::validate(&bytes).is_ok()
         {
-            return Ok(Some((bytes, shaped, family)));
+            return Ok((std::sync::Arc::new(bytes), family));
         }
     }
     Err(EditError::Invalid("complex text needs the complete source TrueType/OpenType face; load that font before editing".into()))
+}
+
+struct ContextualParagraph<'a> {
+    chars: std::ops::Range<usize>,
+    bytes: Vec<usize>,
+    layout: pdfcraft_fonts::source_shaping::Paragraph<'a>,
+    face: std::sync::Arc<Vec<u8>>,
+    family: String,
+}
+
+impl ContextualParagraph<'_> {
+    fn byte_range(&self, range: std::ops::Range<usize>) -> Result<std::ops::Range<usize>, EditError> {
+        let invalid = || EditError::Invalid("the shaped source range is outside its paragraph".into());
+        let begin = range.start.checked_sub(self.chars.start).ok_or_else(invalid)?;
+        let end = range.end.checked_sub(self.chars.start).ok_or_else(invalid)?;
+        if begin > end {
+            return Err(invalid());
+        }
+        let begin = self.bytes.get(begin).copied().ok_or_else(invalid)?;
+        let end = self.bytes.get(end).copied().ok_or_else(invalid)?;
+        Ok(begin..end)
+    }
 }
 
 /// For each output row (a range of the draft's characters), whether it is exactly the source row
@@ -394,6 +420,22 @@ fn untouched_rows(block: &TextBlock, draft: &str, rows: &[std::ops::Range<usize>
 /// Rewrite visual rows while keeping the source style on each surviving character. Resource
 /// names may differ between Unicode subsets of the same face; encoding searches those subsets.
 pub(super) fn rewrite_styled_block(
+    doc: &mut Document,
+    page: usize,
+    block: &TextBlock,
+    lines: &[TextLine],
+    text: Option<&str>,
+    style: &BlockStyle,
+) -> Result<LineEdit, EditError> {
+    // Font completion and shaped CID maps may allocate before a later paragraph is validated.
+    // Commit once: rejected font/style/geometry input must leave the source PDF byte-identical.
+    let mut edited = doc.clone();
+    let result = rewrite_styled_block_inner(&mut edited, page, block, lines, text, style)?;
+    *doc = edited;
+    Ok(result)
+}
+
+fn rewrite_styled_block_inner(
     doc: &mut Document,
     page: usize,
     block: &TextBlock,
@@ -500,6 +542,15 @@ pub(super) fn rewrite_styled_block(
     let p = page_dict(doc, page)?;
     let mut res = p.dict.get(b"Resources").and_then(|r| doc.resolve(r).as_dict().cloned()).unwrap_or_default();
     let mut fonts = res.get(b"Font").and_then(|r| doc.resolve(r).as_dict().cloned()).unwrap_or_default();
+    let streams = content_streams(doc, &p.dict);
+    let pieces = Pieces::join(&streams.iter().map(|(_, d)| d.as_slice()).collect::<Vec<_>>());
+    let ops = pieces.parse().ops;
+    let shown = interpret(doc, &ops, &fonts, &mut HashMap::new(), &mut Carry::new(), None, None)?;
+    let source_ops: std::collections::HashSet<_> = block.lines.iter().filter_map(|i| lines.get(*i)).flat_map(|l| l.ops.iter().copied()).collect();
+    let affected_bts: std::collections::HashSet<_> = shown.iter().filter(|s| source_ops.contains(&s.op)).map(|s| s.bt).collect();
+    if shown.iter().any(|s| affected_bts.contains(&s.bt) && s.state.render_mode >= 4) {
+        return Err(EditError::Invalid("text used as a clipping path cannot be rewritten".into()));
+    }
     for line in lines.iter().filter(|line| line.font.starts_with("PCRange")) {
         let mut f = Dict::new();
         f.set(b"Type".to_vec(), Object::name("Font"));
@@ -533,8 +584,10 @@ pub(super) fn rewrite_styled_block(
     }
     // A visual row grows even when it contains several source/font runs. Multi-row
     // paragraphs retain their container width; an explicit width always wins.
+    let rtl = pdfcraft_fonts::appearance_text::paragraph_rtl(draft);
     let natural = if block.invisible || block.rows.len() == 1 {
-        (p.crop(doc)[2] - 36.0 - (block.rect[0] + dx)).max(block.rect[2] - block.rect[0])
+        let available = if rtl { block.rect[2] + dx - (p.crop(doc)[0] + 36.0) } else { p.crop(doc)[2] - 36.0 - (block.rect[0] + dx) };
+        available.max(block.rect[2] - block.rect[0])
     } else {
         block.rect[2] - block.rect[0]
     };
@@ -550,6 +603,14 @@ pub(super) fn rewrite_styled_block(
         for ch in draft.get(range).unwrap_or_default().chars() {
             if ch == '\n' {
                 chars.push((ch, index, source.font.clone()));
+                continue;
+            }
+            if pdfcraft_fonts::embedding::default_ignorable(ch) {
+                let resource = overrides.get(&index).and_then(|r| r.resource.as_ref()).or(style.resource.as_ref()).unwrap_or(&source.font);
+                if !metrics.contains_key(resource) {
+                    return Err(EditError::Invalid("the selected font resource is missing".into()));
+                }
+                chars.push((ch, index, resource.clone()));
                 continue;
             }
             let s = ch.to_string();
@@ -643,6 +704,116 @@ pub(super) fn rewrite_styled_block(
     let size_of = |source: &TextLine, index: usize| {
         overrides.get(&index).and_then(|r| r.size).or(style.size).unwrap_or(source.size).max(0.1) / source.origin.k.max(1e-6)
     };
+    let mut paragraph_texts = Vec::new();
+    let mut char_start = 0;
+    for paragraph in draft.split('\n') {
+        let end = char_start + paragraph.chars().count();
+        paragraph_texts.push((char_start..end, paragraph.to_owned()));
+        char_start = end + 1;
+    }
+    let effective = |index: usize| {
+        let source = lines.get(index).unwrap_or(first);
+        let r = overrides.get(&index);
+        (
+            size_of(source, index),
+            r.and_then(|r| r.color).or(style.color).unwrap_or(source.color),
+            r.and_then(|r| r.char_spacing).or(style.char_spacing).map_or(source.origin.state.char_spacing, |v| v / source.origin.k.max(1e-6)),
+            r.and_then(|r| r.scale).or(style.scale).map_or(source.origin.state.scale, |v| (v / 100.0).clamp(0.1, 10.0)),
+            source.origin.state.word_spacing,
+            source.origin.k,
+            source.origin.state.render_mode,
+            underlines.get(&index).copied().or(style.underline),
+        )
+    };
+    let mut faces = HashMap::new();
+    let mut programs: Vec<std::sync::Arc<Vec<u8>>> = Vec::new();
+    let mut program_bytes = 0usize;
+    let mut contexts = Vec::new();
+    for (range, paragraph) in &paragraph_texts {
+        if !pdfcraft_fonts::source_shaping::required(paragraph) || range.is_empty() {
+            continue;
+        }
+        let Some(seed) = chars.get(range.start).cloned() else { continue };
+        let look = effective(seed.1);
+        let mut face = None;
+        let mut family = String::new();
+        let mut seen = std::collections::HashSet::new();
+        for item in chars.get(range.clone()).unwrap_or_default() {
+            if effective(item.1) != look {
+                return Err(EditError::Invalid("contextual/bidi text across different styles needs a uniform full-face paragraph".into()));
+            }
+            if !faces.contains_key(&item.2) {
+                if faces.len() >= 256 {
+                    return Err(EditError::Invalid("the contextual text uses too many source font resources".into()));
+                }
+                let (bytes, family) = source_face(doc, &fonts, &item.2, paragraph)?;
+                let bytes = if let Some(previous) = programs.iter().find(|previous| previous.as_slice() == bytes.as_slice()) {
+                    previous.clone()
+                } else {
+                    program_bytes = program_bytes
+                        .checked_add(bytes.len())
+                        .filter(|total| *total <= 64 * 1024 * 1024)
+                        .ok_or_else(|| EditError::Invalid("the shaped source fonts exceed their memory budget".into()))?;
+                    if programs.len() >= 256 {
+                        return Err(EditError::Invalid("the paragraph uses too many distinct source fonts".into()));
+                    }
+                    programs.push(bytes.clone());
+                    bytes
+                };
+                faces.insert(item.2.clone(), (bytes, family));
+            }
+            if !seen.insert(&item.2) {
+                continue;
+            }
+            let (bytes, name) = faces.get(&item.2).ok_or_else(|| EditError::Invalid("the source face is missing".into()))?;
+            if face.as_ref().is_some_and(|f: &std::sync::Arc<Vec<u8>>| !std::sync::Arc::ptr_eq(f, bytes) && f.as_slice() != bytes.as_slice()) {
+                return Err(EditError::Invalid("contextual/bidi text across different font programs needs a uniform full-face paragraph".into()));
+            }
+            face = Some(bytes.clone());
+            family = name.clone();
+        }
+        // Distinct CID maps of the same complete font do not represent distinct styles. Keep
+        // one source identity while shaping so editing a saved Arabic row stays contextual.
+        for item in chars.get_mut(range.clone()).unwrap_or_default() {
+            item.1 = seed.1;
+            item.2 = seed.2.clone();
+        }
+        let mut bytes: Vec<_> = paragraph.char_indices().map(|(at, _)| at).collect();
+        bytes.push(paragraph.len());
+        contexts.push(ContextualParagraph {
+            chars: range.clone(),
+            bytes,
+            layout: pdfcraft_fonts::source_shaping::Paragraph::new(paragraph).map_err(EditError::Invalid)?,
+            face: face.ok_or_else(|| EditError::Invalid("the source face is missing".into()))?,
+            family,
+        });
+    }
+    let context_for = |range: std::ops::Range<usize>| {
+        contexts
+            .get(contexts.partition_point(|p| p.chars.start <= range.start).saturating_sub(1))
+            .filter(|p| p.chars.start <= range.start && range.end <= p.chars.end)
+    };
+    let shape_at = |range: std::ops::Range<usize>| -> Result<Option<_>, EditError> {
+        let Some(context) = context_for(range.clone()) else { return Ok(None) };
+        let index = chars.get(context.chars.start).ok_or_else(|| EditError::Invalid("the shaped paragraph has no source style".into()))?.1;
+        let source = lines.get(index).unwrap_or(first);
+        let size = size_of(source, index);
+        let scale = overrides.get(&index).and_then(|r| r.scale).or(style.scale).map_or(source.origin.state.scale, |s| (s / 100.0).clamp(0.1, 10.0));
+        let unit = size * scale * source.origin.k;
+        if !unit.is_finite() || unit <= 0.0 {
+            return Err(EditError::Invalid("the shaped source text has an unsupported scale".into()));
+        }
+        let spacing = overrides
+            .get(&index)
+            .and_then(|r| r.char_spacing)
+            .or(style.char_spacing)
+            .map_or(source.origin.state.char_spacing, |s| s / source.origin.k.max(1e-6));
+        let shaped = context
+            .layout
+            .shape_fitted(&context.face, context.byte_range(range)?, width / unit, spacing / size, source.origin.state.word_spacing / size)
+            .map_err(EditError::Invalid)?;
+        Ok(Some((context.face.clone(), shaped, context.family.clone())))
+    };
     // A source run may carry TJ kerning/justification that is absent from its text state.
     // Keep its measured advance when rebuilding the run instead of making it wrap on entry.
     // Each font's space width, worked out once: when a font can't show a space, finding one
@@ -694,7 +865,8 @@ pub(super) fn rewrite_styled_block(
             * across(source)
             * calibration.get(&item.1).copied().unwrap_or(1.0)
     };
-    let measure = |items: &[(char, usize, String)]| -> Result<f64, EditError> {
+    let measure = |range: std::ops::Range<usize>| -> Result<f64, EditError> {
+        let items = chars.get(range.clone()).unwrap_or_default();
         let mut width = 0.0;
         let mut at = 0;
         while let Some(item) = items.get(at) {
@@ -703,8 +875,7 @@ pub(super) fn rewrite_styled_block(
                 end += 1;
             }
             let segment = items.get(at..end).unwrap_or_default();
-            let string: String = segment.iter().map(|v| v.0).collect();
-            if let Some((_, shaped, _)) = shape_source(doc, &fonts, &item.2, &string)? {
+            if let Some((_, shaped, _)) = shape_at(range.start + at..range.start + end)? {
                 let source = lines.get(item.1).unwrap_or(first);
                 let scale =
                     overrides.get(&item.1).and_then(|r| r.scale).or(style.scale).map_or(source.origin.state.scale, |s| (s / 100.0).clamp(0.1, 10.0));
@@ -713,11 +884,8 @@ pub(super) fn rewrite_styled_block(
                     .and_then(|r| r.char_spacing)
                     .or(style.char_spacing)
                     .map_or(source.origin.state.char_spacing, |s| s / source.origin.k.max(1e-6));
-                width += (shaped.advance * size_of(source, item.1)
-                    + spacing * string.chars().count() as f64
-                    + source.origin.state.word_spacing * string.matches(' ').count() as f64)
-                    * scale
-                    * source.origin.k;
+                let size = size_of(source, item.1);
+                width += shaped.spaced_advance(spacing / size, source.origin.state.word_spacing / size) * size * scale * source.origin.k;
             } else {
                 width += segment.iter().map(&advance).sum::<f64>();
             }
@@ -734,6 +902,32 @@ pub(super) fn rewrite_styled_block(
     // Wrap at word boundaries, retaining explicit source row breaks and whitespace.
     let mut at = 0;
     while at < chars.len() {
+        if let Some(context) = context_for(at..at).filter(|p| p.chars.start == at) {
+            let failure = std::cell::RefCell::new(None);
+            let ranges = pdfcraft_fonts::appearance_text::wrap_ranges(context.layout.text(), width, |bytes| {
+                let begin = context.chars.start + context.bytes.partition_point(|b| *b < bytes.start);
+                let end = context.chars.start + context.bytes.partition_point(|b| *b < bytes.end);
+                measure(begin..end).unwrap_or_else(|error| {
+                    *failure.borrow_mut() = Some(error);
+                    f64::INFINITY
+                })
+            });
+            if let Some(error) = failure.into_inner() {
+                return Err(error);
+            }
+            for bytes in ranges {
+                let start = context.chars.start + context.bytes.partition_point(|b| *b < bytes.start);
+                let end = context.chars.start + context.bytes.partition_point(|b| *b < bytes.end);
+                row_ranges.push(start..end);
+                rows.push(chars.get(start..end).unwrap_or_default().to_vec());
+            }
+            at = context.chars.end;
+            if chars.get(at).is_some_and(|item| item.0 == '\n') {
+                at += 1;
+            }
+            row_start = at;
+            continue;
+        }
         let Some(item) = chars.get(at) else { break };
         if item.0 == '\n' {
             row_ranges.push(row_start..row_start + row.len());
@@ -754,7 +948,7 @@ pub(super) fn rewrite_styled_block(
             }
         }
         let word = chars.get(at..end).unwrap_or_default();
-        let w = measure(word)?;
+        let w = measure(at..end)?;
         if !row.is_empty() && !item.0.is_whitespace() && row_width + w > width + 0.5 {
             while row.last().is_some_and(|c: &(char, usize, String)| c.0.is_whitespace()) {
                 row.pop();
@@ -772,9 +966,6 @@ pub(super) fn rewrite_styled_block(
         row_ranges.push(row_start..row_start + row.len());
         rows.push(row);
     }
-    let streams = content_streams(doc, &p.dict);
-    let pieces = Pieces::join(&streams.iter().map(|(_, d)| d.as_slice()).collect::<Vec<_>>());
-    let ops = pieces.parse().ops;
     // A row the edit doesn't reach keeps its source operators, so its kerning, TJ word gaps and
     // glyph widths stay exactly as they were instead of being rebuilt from the text state.
     let plain = BlockStyle { ranges: Vec::new(), ..style.clone() } == BlockStyle::default();
@@ -809,7 +1000,7 @@ pub(super) fn rewrite_styled_block(
             ));
         }
     }
-    let measured: Vec<_> = rows.iter().map(|r| measure(r)).collect::<Result<_, _>>()?;
+    let measured: Vec<_> = row_ranges.iter().cloned().map(measure).collect::<Result<_, _>>()?;
     let mut shaped_runs = HashMap::new();
     let mut segment_advances = HashMap::new();
     for (row_index, row) in rows.iter().enumerate().filter(|(r, _)| !kept.get(*r).copied().unwrap_or(false)) {
@@ -820,19 +1011,57 @@ pub(super) fn rewrite_styled_block(
                 end += 1;
             }
             segment_advances.insert((row_index, at), row.get(at..end).unwrap_or_default().iter().map(&advance).sum::<f64>());
-            let string: String = row.get(at..end).unwrap_or_default().iter().map(|v| v.0).collect();
-            if let Some((bytes, shaped, family)) = shape_source(doc, &fonts, &item.2, &string)? {
+            let start = row_ranges.get(row_index).map_or(0, |r| r.start);
+            if let Some((bytes, shaped, family)) = shape_at(start + at..start + end)? {
                 shaped_runs.insert((row_index, at), (bytes, shaped, family));
             }
             at = end;
         }
     }
+    // One full program per CID-map chunk, shared across wrapped rows. Embedding an entire
+    // font for every short row amplifies a narrow paragraph into hundreds of font programs.
+    let mut groups = Vec::new();
+    let mut active_groups = HashMap::new();
     let mut glyph_resources = HashMap::new();
-    for (key, (bytes, shaped, family)) in &shaped_runs {
-        let mappings: Vec<_> = shaped.glyphs.iter().map(|g| (g.text.clone(), g.id)).collect();
-        let resource = pdfcraft_fonts::embedding::embed_mapping(doc, &mut fonts, bytes, family, &mappings).map_err(EditError::Invalid)?;
-        glyph_resources.insert(*key, resource);
+    let mut shaped_keys: Vec<_> = shaped_runs.keys().copied().collect();
+    shaped_keys.sort_unstable();
+    for key in shaped_keys {
+        let (bytes, shaped, family) = &shaped_runs[&key];
+        let face = std::sync::Arc::as_ptr(bytes) as usize;
+        let mut codes = Vec::new();
+        for glyph in &shaped.glyphs {
+            let index = *active_groups.entry(face).or_insert_with(|| {
+                groups.push((bytes.clone(), family.clone(), Vec::new(), HashMap::new()));
+                groups.len() - 1
+            });
+            let mapping = (glyph.id.to_u32(), glyph.text.clone());
+            let index = if groups[index].2.len() >= 65_534 && !groups[index].3.contains_key(&mapping) {
+                groups.push((bytes.clone(), family.clone(), Vec::new(), HashMap::new()));
+                let next = groups.len() - 1;
+                active_groups.insert(face, next);
+                next
+            } else {
+                index
+            };
+            let group = &mut groups[index];
+            let code = if let Some(code) = group.3.get(&mapping) {
+                *code
+            } else {
+                let code = u16::try_from(group.2.len() + 1).map_err(|_| EditError::Invalid("shaped glyph limit".into()))?;
+                group.2.push((glyph.text.clone(), glyph.id));
+                group.3.insert(mapping, code);
+                code
+            };
+            codes.push((index, code));
+        }
+        glyph_resources.insert(key, codes);
     }
+    let resources = groups
+        .iter()
+        .map(|(bytes, family, mappings, _)| {
+            pdfcraft_fonts::embedding::embed_mapping(doc, &mut fonts, bytes, family, mappings).map_err(EditError::Invalid)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let n = pdfcraft_content::num;
     let mut block_ops = vec![Op::new("q", vec![])];
     block_ops.extend(reveal_ops(block, lines, style, o.ctm)?);
@@ -869,7 +1098,14 @@ pub(super) fn rewrite_styled_block(
             continue;
         }
         let w = measured.get(row_index).copied().unwrap_or(0.0);
-        let align = style.align.unwrap_or(if centered { crate::added::Align::Center } else { crate::added::Align::Left });
+        let row_rtl = row_ranges.get(row_index).cloned().and_then(context_for).is_some_and(|p| p.layout.rtl());
+        let align = style.align.unwrap_or(if row_rtl {
+            crate::added::Align::Right
+        } else if centered {
+            crate::added::Align::Center
+        } else {
+            crate::added::Align::Left
+        });
         let original_rect = block.rows.get(row_index).and_then(|row| row_rect(row, lines)).unwrap_or(block.rect);
         let left = if style.width.is_none() && style.align.is_none() { original_rect[0] } else { block.rect[0] };
         let available = if style.width.is_none() && style.align.is_none() { original_rect[2] - original_rect[0] } else { width };
@@ -911,42 +1147,57 @@ pub(super) fn rewrite_styled_block(
             tm[5] += ay;
             let mut segment_width = segment_advances.get(&(row_index, pos)).copied().unwrap_or(0.0);
             if let Some((_, shaped, _)) = shaped_runs.get(&(row_index, pos)) {
-                let resource = glyph_resources.get(&(row_index, pos)).ok_or_else(|| EditError::Invalid("shaped font is missing".into()))?;
+                let codes = glyph_resources.get(&(row_index, pos)).ok_or_else(|| EditError::Invalid("shaped font is missing".into()))?;
                 let mut properties = Dict::new();
                 properties.set(b"ActualText".to_vec(), Object::String(PdfString::text(&string)));
                 block_ops.push(Op::new("BDC", vec![Object::name("Span"), Object::Dict(properties)]));
-                state.font = Some((resource.clone(), size_of(source, item.1)));
                 // One text object for the run: each glyph is placed where shaping put it by a TJ
                 // adjustment from where the glyph before it ends (its advance in the embedded
                 // font's widths), and raised by the text rise for a mark set above or below
-                // (ISO 32000-1 §9.4.3, §9.3.7). Font-program codes are separate from Unicode;
-                // ToUnicode and ActualText keep the logical text.
+                // (ISO 32000-1 §9.4.3, §9.3.7). A run whose glyphs fill more than one embedded
+                // program switches font inside the object. Font-program codes are separate from
+                // Unicode; ToUnicode and ActualText keep the logical text.
                 let size = size_of(source, item.1);
                 let per_unit = 1000.0 / size;
                 if !per_unit.is_finite() {
                     return Err(EditError::Invalid("the shaped text has no size".into()));
                 }
-                let shown = fonts
-                    .get(resource.as_bytes())
-                    .and_then(|f| doc.resolve(f).as_dict().cloned())
-                    .map(|d| Metrics::from_dict(doc, &d))
-                    .ok_or_else(|| EditError::Invalid("shaped font is missing".into()))?;
                 // Spacing is part of each glyph's position, so the run itself has none.
                 let (char_spacing, word_spacing, rise) = (state.char_spacing, state.word_spacing, state.rise);
                 state.char_spacing = 0.0;
                 state.word_spacing = 0.0;
+                let mut current = codes.first().map(|(font, _)| *font);
+                if let Some(resource) = current.and_then(|font| resources.get(font)) {
+                    state.font = Some((resource.clone(), size));
+                }
                 block_ops.push(Op::new("BT", vec![]));
                 block_ops.extend(state.ops());
                 block_ops.push(Op::new("Tm", tm.iter().map(|v| n(*v)).collect()));
                 // `pen`: where the next glyph would start, in thousandths of the font size.
                 let (mut pen, mut extra, mut raised) = (0.0, 0.0, rise);
                 let mut shown_glyphs: Vec<Object> = Vec::new();
+                let mut widths: HashMap<usize, Metrics> = HashMap::new();
                 for (i, glyph) in shaped.glyphs.iter().enumerate() {
+                    let (font, code) = *codes.get(i).ok_or_else(|| EditError::Invalid("shaped glyph mapping is missing".into()))?;
+                    let resource = resources.get(font).ok_or_else(|| EditError::Invalid("shaped font is missing".into()))?;
+                    if let std::collections::hash_map::Entry::Vacant(slot) = widths.entry(font) {
+                        let metrics = fonts
+                            .get(resource.as_bytes())
+                            .and_then(|f| doc.resolve(f).as_dict().cloned())
+                            .map(|d| Metrics::from_dict(doc, &d))
+                            .ok_or_else(|| EditError::Invalid("shaped font is missing".into()))?;
+                        slot.insert(metrics);
+                    }
                     let target = (glyph.position[0] * size + extra) * per_unit;
                     let glyph_rise = rise + glyph.position[1] * size;
-                    if (glyph_rise - raised).abs() > 1e-9 || shown_glyphs.len() >= 4096 {
+                    let switch = current != Some(font);
+                    if switch || (glyph_rise - raised).abs() > 1e-9 || shown_glyphs.len() >= 4096 {
                         if !shown_glyphs.is_empty() {
                             block_ops.push(Op::new("TJ", vec![Object::Array(std::mem::take(&mut shown_glyphs))]));
+                        }
+                        if switch {
+                            block_ops.push(Op::new("Tf", vec![Object::name(resource.as_str()), n(size)]));
+                            current = Some(font);
                         }
                         if (glyph_rise - raised).abs() > 1e-9 {
                             block_ops.push(Op::new("Ts", vec![n(glyph_rise)]));
@@ -956,10 +1207,10 @@ pub(super) fn rewrite_styled_block(
                     if (target - pen).abs() > 1e-6 {
                         shown_glyphs.push(n(pen - target));
                     }
-                    let code = u16::try_from(i + 1).map_err(|_| EditError::Invalid("shaped glyph limit".into()))?;
                     shown_glyphs.push(Object::String(PdfString::literal(code.to_be_bytes().to_vec())));
-                    pen = target + shown.width(u32::from(code)) * 1000.0;
-                    extra += char_spacing * glyph.text.chars().count() as f64 + word_spacing * glyph.text.matches(' ').count() as f64;
+                    pen = target + widths.get(&font).map_or(0.0, |m| m.width(u32::from(code))) * 1000.0;
+                    extra += char_spacing * glyph.text.chars().filter(|c| !pdfcraft_fonts::embedding::default_ignorable(*c)).count() as f64
+                        + word_spacing * glyph.text.matches(' ').count() as f64;
                 }
                 if !shown_glyphs.is_empty() {
                     block_ops.push(Op::new("TJ", vec![Object::Array(shown_glyphs)]));
@@ -1006,24 +1257,31 @@ pub(super) fn rewrite_styled_block(
         };
     }
     block_ops.push(Op::new("Q", vec![]));
-    let mut drop = coincident_ops(lines, &members);
+    let same_scope: Vec<_> = lines.iter().filter(|line| members.iter().any(|target| line.scope == target.scope)).cloned().collect();
+    let mut drop = coincident_ops(&same_scope, &members);
     drop.extend(members.iter().flat_map(|l| l.ops.iter().copied()));
-    let start = lead.ops.first().copied().unwrap_or(o.bt_op);
-    let split = ops
-        .get(o.bt_op..start)
-        .unwrap_or_default()
+    let source = shown
         .iter()
-        .enumerate()
-        .any(|(i, op)| matches!(op.op.as_slice(), b"Tj" | b"TJ" | b"'" | b"\"") && !drop.contains(&(o.bt_op + i)));
-    let after = if split { &o.state } else { &o.bt_state };
-    block_ops.extend(after.ops());
-    if split {
-        block_ops.insert(0, Op::new("ET", vec![]));
-        block_ops.push(Op::new("BT", vec![]));
-        block_ops.push(Op::new("Tm", o.tlm.iter().map(|v| n(*v)).collect()));
+        .find(|s| lead.ops.contains(&s.op))
+        .ok_or_else(|| EditError::Invalid("the paragraph has no source text-show operation".into()))?;
+    let at = source.op;
+    let mut patches = HashMap::new();
+    for source in shown.iter().filter(|s| drop.contains(&s.op)) {
+        if source.state.render_mode >= 4 {
+            return Err(EditError::Invalid("coincident text used as a clipping path cannot be rewritten".into()));
+        }
+        patches.insert(source.op, super::shaped::source_advance(source, &ops)?);
     }
-    let at = if split { start } else { o.bt_op };
-    let data = splice(&pieces, &ops, |i| (if i == at { std::mem::take(&mut block_ops) } else { Vec::new() }, !drop.contains(&i)));
+    let mut prefix = patches.remove(&at).ok_or_else(|| EditError::Invalid("the source advance is missing".into()))?;
+    let advance = prefix.pop().ok_or_else(|| EditError::Invalid("the source advance is missing".into()))?;
+    block_ops.insert(0, Op::new("ET", vec![]));
+    block_ops.push(Op::new("BT", vec![]));
+    block_ops.extend(lead.origin.state.ops());
+    block_ops.extend(super::shaped::restore_text_matrix(source)?);
+    prefix.extend(block_ops);
+    prefix.push(advance);
+    patches.insert(at, prefix);
+    let data = splice(&pieces, &ops, |i| (patches.remove(&i).unwrap_or_default(), !drop.contains(&i)));
     let contents = rewritten_contents(doc, &streams, data);
     res.set(b"Font".to_vec(), Object::Dict(fonts));
     doc.update_dict(p.obj, |d| {
@@ -1031,4 +1289,24 @@ pub(super) fn rewrite_styled_block(
         d.set(b"Resources".to_vec(), Object::Dict(res));
     })?;
     Ok(LineEdit { substituted })
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::ContextualParagraph;
+
+    #[test]
+    fn contextual_byte_ranges_reject_outside_or_reversed_input() {
+        let paragraph = ContextualParagraph {
+            chars: 4..6,
+            bytes: vec![0, 2, 4],
+            layout: pdfcraft_fonts::source_shaping::Paragraph::new("اب").unwrap(),
+            face: std::sync::Arc::new(Vec::new()),
+            family: String::new(),
+        };
+        assert_eq!(paragraph.byte_range(4..6).unwrap(), 0..4);
+        for (start, end) in [(0, 1), (3, 4), (4, 7), (6, 5), (usize::MAX, usize::MAX)] {
+            assert!(paragraph.byte_range(start..end).is_err());
+        }
+    }
 }

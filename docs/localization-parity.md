@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-21 · **Last updated:** 2026-10-21 · **Change:** minor (Brazilian Portuguese now covers the 2,674-key catalog union; twelve-language mean still rounds to ≈68%; Spanish 100% of the current key union) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
+> **Last reviewed:** 2026-10-21 · **Last updated:** 2026-10-22 · **Change:** minor (Arabic native bidi text layout/editing; interface not mirrored; readiness and estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 
 Per-language status of PdfCraft's interface against Acrobat Pro's. How translations work and how to
 add a language: [localization.md](localization.md). Summary in [ROADMAP.md](../ROADMAP.md).
@@ -37,7 +37,7 @@ add a language: [localization.md](localization.md). Summary in [ROADMAP.md](../R
 | Simplified Chinese | `zh-hans` | 2,088 (97.4%) | dialogs and tooltips through `tl!`; no help | CJK text and IME work, but **release builds have no Hans face**: many characters show as boxes (#826, #688, #728, #758; Flatpak #689) | no | partial | yes | 6–12 |
 | Spanish | `es` | 2,674 (100% of current key union) | dialogs and tooltips; no help | Latin | no | partial | yes | 2–4 |
 | Hindi | `hi` | 0 | none | Devanagari not tested (egui shapes Telugu conjuncts, so shaping is likely workable); no Devanagari face in craft-fonts | no | none | no | 10–18 |
-| Arabic | `ar` | 2,143 (100%) | dialogs and tooltips; no help | Letters joined and lines reordered at load, but **layout not mirrored**, wrapped lines break at the wrong end, typed text runs left to right (`localization.md` §Arabic) | no | partial | yes (Middle East edition) | 25–45 |
+| Arabic | `ar` | 2,143 (100%) | dialogs and tooltips; no help | Logical catalog; native bidi shaping/wrapping, input, caret, selection, clipboard, IME and accessibility; **interface layout not mirrored** (`localization.md` §Arabic) | no | partial | yes (Middle East edition) | 25–45 |
 | French | `fr` | 2,128 (99.3%) | dialogs and tooltips; no help | Latin | no | partial | yes | 1–2 |
 | Portuguese (Brazil) | `pt-br` | 2,674 (100% of current union) | dialogs and tooltips; no help | Latin | community (#288) | partial | yes | 1–2 |
 | Indonesian | `id` | 0 | none | Latin | no | none | no | 3–5 |
@@ -47,10 +47,15 @@ add a language: [localization.md](localization.md). Summary in [ROADMAP.md](../R
 | Vietnamese | `vi` | 2,674 (100% of current key union) | dialogs and tooltips; no help | Latin with stacked diacritics; bundled Inter covers them (fonts test) | community | partial | no | 2–4 |
 
 **Localization dimension ≈ 68%**: the mean over the twelve, counting a catalog's percentage but only
-60% for Chinese and Arabic until their script problems are fixed, and 0 for Hindi, Indonesian and
+60% for Chinese and Arabic until their remaining delivery/layout problems are fixed, and 0 for Hindi, Indonesian and
 Korean (still missing). Vietnamese moved from 0% to 100% in that mean (59% → 68%). **≈ 55–110 h**
-to bring all twelve to `full`, of which ≈ 35–60 h is engineering (Hans face, RTL layout, bidi text)
+to bring all twelve to `full`, of which ≈ 35–60 h is engineering (Hans face and mirrored RTL layout)
 and the rest catalogs and fixes; native-speaker review needs humans.
+
+The Arabic text-layout work does not remeasure this historical readiness estimate. Its vendor
+regressions exercise real pointer, keyboard, clipboard and IME events, logical AccessKit text,
+mixed scripts and fractional DPI. It does not establish a mirrored interface or native-language
+review, and native release acceptance remains separate from those automated tests.
 
 No language is `full` except English: every catalog leaves engine error details in English, and
 none has translated help. The **To `full`** hours of Vietnamese and Spanish are therefore residual
@@ -91,6 +96,7 @@ Acrobat languages PdfCraft lacks: Danish, Dutch, Swedish, Hebrew. Vietnamese is 
 | 2026-10-21 | minor | Brazilian Portuguese (`pt-br`) now covers all 2,674 distinct keys in the current catalog union; no help or engine/OS error-detail localization; twelve-language mean still rounds to ≈ 68% |
 | 2026-10-20 | minor | Spanish: the 143 keys the other catalogs had and `es.tsv` was missing; `es` now covers the whole 2,674-key union, like `lt` and `vi`. Restated Lithuanian against the current union (its 2,585 was measured on 2026-10-13) and said plainly in *How this was measured* that the union moves, so counts only compare within a date |
 | 2026-10-19 | minor | Removed the 2026-10-13 status line and the 14-language summary that concurrent merges left beside the current ones; the summary keeps the Italian and Norwegian Bokmål measurement dates |
+| 2026-10-18 | minor | Arabic catalogs stay logical and use native bidi text layout/editing, including clipboard, IME and accessibility. Interface layout remains unmirrored; status and historical estimates unchanged. |
 | 2026-10-16 | minor | Czech: 2,674 entries after adding the keys the other catalogs had (the engine's sentences, weekday heads, certificate fields, shared buttons) and unifying "tag" as *tag* (not *značka*, which is a redaction mark) |
 | 2026-10-13 | minor | Vietnamese (`vi`) catalog: 2,591 entries (100% of current key union + `theme`/`Appearance`); twelve-language mean ≈ 68%; native-speaker community review; registered with `plural_none` |
 | 2026-10-14 | minor | Italian: 2,528 entries after adding the 201 keys the other catalogs had and the code looks up |

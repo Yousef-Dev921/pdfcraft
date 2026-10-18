@@ -14,7 +14,7 @@ use hayro::hayro_interpret::{
     BlendMode, ClipPath, Context, Device, GlyphDrawMode, Image, InterpreterCache, InterpreterSettings, Paint, PathDrawMode, SoftMask, interpret_page,
 };
 use kurbo::{Affine, BezPath, Rect, Shape};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Semantic exclusions for statistics. Untagged text is retained; no layout guess is made.
 #[derive(Clone, Debug, Default)]
@@ -36,6 +36,9 @@ impl TextFilter {
     }
 }
 
+mod actual_text_map;
+#[cfg(test)]
+mod actual_text_tests;
 mod search;
 
 /// Whether `(x, y)` lies in or on the convex quadrilateral `quad`, whichever way it winds. A
@@ -225,7 +228,9 @@ impl PageText {
     /// gaps, blank glyphs and line ends.
     pub fn word_at(&self, i: usize) -> Option<(usize, usize)> {
         self.glyphs.get(i)?;
-        let blank = |k: usize| self.glyphs.get(k).is_none_or(|g| g.text.trim().is_empty());
+        let blank = |k: usize| {
+            self.glyphs.get(k).is_none_or(|g| g.text.trim().is_empty() || g.text.chars().all(pdfcraft_fonts::appearance_text::is_bidi_control))
+        };
         // Glyph `k` (≥ 1) follows glyph `k - 1` with no word gap or line break between them.
         let joined = |k: usize| !self.space_before.get(k).copied().unwrap_or(true) && self.line_of.get(k - 1) == self.line_of.get(k);
         let mut first = i;
@@ -256,7 +261,9 @@ impl PageText {
         Some((first, last))
     }
 
-    /// Merge the boxes of `range` into one rectangle per line (for highlighting).
+    /// Merge `range` into continuous painted pieces on each line. A logical bidi range may
+    /// have several pieces: joining across an unselected visual run would over-highlight it
+    /// and could redact text outside the requested range.
     pub fn line_rects(&self, range: std::ops::Range<usize>) -> Vec<[f32; 4]> {
         self.merged_rects(range)
     }
@@ -269,18 +276,80 @@ impl PageText {
     }
 
     fn merged_rects(&self, glyphs: impl IntoIterator<Item = usize>) -> Vec<[f32; 4]> {
-        let mut out: Vec<(u32, usize, [f32; 4])> = Vec::new();
+        let mut lines: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
         for i in glyphs {
-            let (Some(g), Some(&line)) = (self.glyphs.get(i), self.line_of.get(i)) else { break };
-            match out.last_mut() {
-                Some((l, last, r)) if *l == line && last.checked_add(1) == Some(i) => {
-                    *last = i;
-                    union(r, &g.rect);
-                }
-                _ => out.push((line, i, g.rect)),
-            }
+            let (Some(_), Some(&line)) = (self.glyphs.get(i), self.line_of.get(i)) else { break };
+            lines.entry(line).or_default().push(i);
         }
-        out.into_iter().map(|(_, _, r)| r).collect()
+        let mut out = Vec::new();
+        // Search may ask for thousands of matches on one hostile line. Only touched short
+        // lines are scanned; beyond the budget gaps stay separate conservatively.
+        let mut budget = 65_536usize;
+        for (line, mut selected) in lines {
+            let Some(first) = selected.first().and_then(|&i| self.glyphs.get(i)) else { continue };
+            let u = first.direction;
+            let project = |g: &TextGlyph| {
+                g.quad.iter().fold([f32::INFINITY, f32::NEG_INFINITY], |r, p| {
+                    let x = p[0] * u[0] + p[1] * u[1];
+                    [r[0].min(x), r[1].max(x)]
+                })
+            };
+            selected.sort_unstable();
+            selected.dedup();
+            let members: HashSet<_> = selected.iter().copied().collect();
+            selected.sort_by(|&a, &b| project(&self.glyphs[a])[0].total_cmp(&project(&self.glyphs[b])[0]).then(a.cmp(&b)));
+            let mut edge = f32::NEG_INFINITY;
+            let has_gap = selected.iter().any(|&i| {
+                let [a, b] = project(&self.glyphs[i]);
+                let gap = a > edge + 0.01 && edge.is_finite();
+                edge = edge.max(b);
+                gap
+            });
+            let mut blockers = None;
+            if has_gap {
+                // line_of is monotone in reading order. Invalid public input keeps the safe
+                // separated-piece fallback instead of indexing outside the supplied arrays.
+                let start = self.line_of.partition_point(|&l| l < line);
+                let end = self.line_of.partition_point(|&l| l <= line).min(self.glyphs.len());
+                let count = end.saturating_sub(start);
+                if count <= 4096 && count <= budget && selected.iter().all(|&i| i >= start && i < end) {
+                    budget -= count;
+                    let mut intervals: Vec<_> = (start..end).filter(|i| !members.contains(i)).map(|i| project(&self.glyphs[i])).collect();
+                    intervals.sort_by(|a, b| a[0].total_cmp(&b[0]));
+                    let mut high = f32::NEG_INFINITY;
+                    let prefix: Vec<_> = intervals
+                        .iter()
+                        .map(|r| {
+                            high = high.max(r[1]);
+                            high
+                        })
+                        .collect();
+                    blockers = Some((intervals, prefix));
+                }
+            }
+            let blocked = |a: f32, b: f32| {
+                blockers.as_ref().is_none_or(|(intervals, prefix)| {
+                    let end = intervals.partition_point(|r| r[0] < b - 0.01);
+                    end.checked_sub(1).and_then(|i| prefix.get(i)).is_some_and(|&high| high > a + 0.01)
+                })
+            };
+            let mut pieces: Vec<(usize, [f32; 4], f32)> = Vec::new();
+            for i in selected {
+                let g = &self.glyphs[i];
+                let [a, b] = project(g);
+                match pieces.last_mut() {
+                    Some((first, rect, edge)) if a <= *edge + 0.01 || !blocked(*edge, a) => {
+                        *first = (*first).min(i);
+                        union(rect, &g.rect);
+                        *edge = (*edge).max(b);
+                    }
+                    _ => pieces.push((i, g.rect, b)),
+                }
+            }
+            pieces.sort_by_key(|p| p.0);
+            out.extend(pieces.into_iter().map(|(_, r, _)| r));
+        }
+        out
     }
 
     /// The glyphs whose centre lies inside `rect` (view space, corners in either order), in
@@ -381,7 +450,13 @@ const WORD_GAP: f32 = 0.15;
 
 /// A glyph with its writing direction to the nearest quarter turn (right, down, left, up) and as
 /// a unit vector.
-type Drawn = (usize, [f64; 2], TextGlyph);
+type Drawn = (usize, [f64; 2], TextGlyph, Option<GlyphPosition>);
+
+#[derive(Clone, Copy)]
+struct GlyphPosition {
+    baseline: [f64; 2],
+    advances: bool,
+}
 
 struct TextDevice {
     /// Every glyph in content order.
@@ -389,10 +464,12 @@ struct TextDevice {
     /// How many marked content sequences are open.
     depth: usize,
     /// The outermost open `/ActualText` replacement: its depth, text and the glyphs drawn inside
-    /// it (with no text of their own yet).
+    /// it, retaining any source Unicode and geometry needed to prove a precise mapping.
     actual: Option<(usize, String, Vec<Drawn>)>,
     /// Every `/ActualText` replacement made on the page.
     replaced: Vec<Replaced>,
+    /// Proven logical clusters, expanded only after the merged span has been laid out.
+    precise: HashMap<usize, Vec<TextGlyph>>,
     filter: TextFilter,
     excluded_depth: Option<usize>,
     actual_filtered: bool,
@@ -433,7 +510,7 @@ fn redraw_tolerance(rect: &[f32; 4]) -> f32 {
 /// One glyph carrying `text`, boxed around `drawn` in their writing direction; `None` when they
 /// span several lines or writing directions (one box would break selection and line grouping).
 fn merge(drawn: &[Drawn], text: String) -> Option<Drawn> {
-    let first = drawn.first()?;
+    let first = drawn.iter().find(|d| d.3.is_some_and(|p| p.advances)).or_else(|| drawn.first())?;
     let (quarter, u) = (first.0, first.1);
     // Across the line: from the writing direction a quarter turn towards the line's bottom.
     let n = [-u[1], u[0]];
@@ -456,7 +533,7 @@ fn merge(drawn: &[Drawn], text: String) -> Option<Drawn> {
     let rect = quad.iter().fold([f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY], |r, p| {
         [r[0].min(p[0]), r[1].min(p[1]), r[2].max(p[0]), r[3].max(p[1])]
     });
-    Some((quarter, u, TextGlyph { text, rect, quad, direction: first.2.direction }))
+    Some((quarter, u, TextGlyph { text, rect, quad, direction: first.2.direction }, None))
 }
 
 impl TextDevice {
@@ -466,6 +543,7 @@ impl TextDevice {
             depth: 0,
             actual: None,
             replaced: Vec::new(),
+            precise: HashMap::new(),
             filter: TextFilter::default(),
             excluded_depth: None,
             actual_filtered: false,
@@ -481,11 +559,12 @@ impl TextDevice {
     ///
     /// A replacement spanning several lines or writing directions stays per glyph (each glyph's own
     /// Unicode). An empty one (a soft hyphen at a line break, say) stands for no text at all.
+    /// Proven ToUnicode clusters are restored only after layout, for precise logical selection.
     fn end_actual_text(&mut self) {
         let Some((_, text, drawn)) = self.actual.take() else { return };
         if std::mem::take(&mut self.actual_filtered) {
-            // ActualText has no mapping from replacement words to individual glyphs. A mixed
-            // span cannot be filtered honestly; a wholly excluded span can simply be omitted.
+            // ActualText has no guaranteed semantic-subspan mapping. A mixed span cannot be
+            // filtered honestly; a wholly excluded span can simply be omitted.
             self.partial_replacement |= !drawn.is_empty();
             return;
         }
@@ -497,6 +576,9 @@ impl TextDevice {
         let at = if text.chars().all(|c| c.is_control()) {
             None
         } else {
+            if let Some(parts) = actual_text_map::precise(&drawn, &text) {
+                self.precise.insert(self.glyphs.len(), parts);
+            }
             self.glyphs.push(glyph);
             Some(self.glyphs.len() - 1)
         };
@@ -563,10 +645,14 @@ impl TextDevice {
         }
         redraws.sort_by_key(|(range, _)| range.start);
         let glyphs = std::mem::take(&mut self.glyphs);
+        let mut precise = std::mem::take(&mut self.precise);
         let mut redraws = redraws.into_iter().peekable();
         let mut i = 0;
         while let Some(g) = glyphs.get(i) {
             let Some((range, k)) = redraws.next_if(|(range, _)| range.start == i) else {
+                if let Some(parts) = precise.remove(&i) {
+                    self.precise.insert(self.glyphs.len(), parts);
+                }
                 self.glyphs.push(g.clone());
                 i += 1;
                 continue;
@@ -574,8 +660,13 @@ impl TextDevice {
             let run = glyphs.get(range.clone()).unwrap_or_default();
             let text = self.replaced.get(k).map(|r| r.text.clone()).unwrap_or_default();
             if !text.chars().all(|c| c.is_control()) {
-                match merge(run, text) {
-                    Some(glyph) => self.glyphs.push(glyph),
+                match merge(run, text.clone()) {
+                    Some(glyph) => {
+                        if let Some(parts) = actual_text_map::precise(run, &text) {
+                            self.precise.insert(self.glyphs.len(), parts);
+                        }
+                        self.glyphs.push(glyph);
+                    }
                     None => self.glyphs.extend_from_slice(run),
                 }
             }
@@ -629,6 +720,11 @@ impl<'a> Device<'a> for TextDevice {
             let kind = if matches!(glyph, Glyph::Type3(_)) { "t3" } else { "ol" };
             eprintln!("{kind} {text:?} transform={:?} glyph_transform={:?}", transform.as_coeffs(), glyph_transform.as_coeffs());
         }
+        let declared_advance = match glyph {
+            Glyph::Outline(g) => g.advance_width().map(f64::from),
+            Glyph::Type3(g) => g.advance_width().map(f64::from),
+        };
+        let advances = declared_advance.is_some_and(|a| a.is_finite() && a > 0.0);
         let advance = match glyph {
             Glyph::Outline(g) => {
                 g.advance_width().filter(|a| *a > 0.0).map(f64::from).unwrap_or_else(|| g.outline().bounding_box().width().max(500.0))
@@ -651,7 +747,12 @@ impl<'a> Device<'a> for TextDevice {
         } else {
             3
         };
-        let em = Rect::new(0.0, -200.0, advance, 800.0);
+        // A source cluster may put its Unicode on a zero-advance dot/mark before its
+        // advancing base. Retain that component's actual ink rather than inventing a wide em.
+        let em = match glyph {
+            Glyph::Outline(g) if replaced && !advances => g.outline().bounding_box(),
+            _ => Rect::new(0.0, -200.0, advance, 800.0),
+        };
         let corners = if matches!(glyph, Glyph::Outline(g) if g.is_vertical()) {
             [(em.x0, em.y1), (em.x0, em.y0), (em.x1, em.y0), (em.x1, em.y1)]
         } else {
@@ -674,9 +775,11 @@ impl<'a> Device<'a> for TextDevice {
             quad: corners.map(|p| [p.x as f32, p.y as f32]),
             direction: direction.map(|d| d as f32),
         };
+        let origin = t * kurbo::Point::ORIGIN;
+        let position = GlyphPosition { baseline: [origin.x, origin.y], advances };
         match &mut self.actual {
-            Some((_, _, drawn)) => drawn.push((dir, direction, glyph)),
-            None => self.glyphs.push((dir, direction, glyph)),
+            Some((_, _, drawn)) => drawn.push((dir, direction, glyph, Some(position))),
+            None => self.glyphs.push((dir, direction, glyph, Some(position))),
         }
     }
     fn draw_image(&mut self, _: Image<'a, '_>, _: Affine) {}
@@ -729,6 +832,7 @@ pub(crate) fn extract_page_filtered(pdf: &Pdf, page: usize, settings: &Interpret
         return Err("a replacement text span mixes included and excluded content; disable the exclusions to count this page".into());
     }
     let glyphs = dev.glyphs;
+    let mut precise = dev.precise;
     // Text on a curved path: glyphs that each continue the previous one's line while the
     // direction turns. Each such run is one line.
     let turned = |u: [f64; 2]| u[0].abs().min(u[1].abs()) > DIRECTION_TOLERANCE;
@@ -751,7 +855,7 @@ pub(crate) fn extract_page_filtered(pdf: &Pdf, page: usize, settings: &Interpret
         start = end;
     }
     let mut quarters: [Vec<usize>; 4] = Default::default();
-    for (i, (quarter, u, _)) in glyphs.iter().enumerate() {
+    for (i, (quarter, u, _, _)) in glyphs.iter().enumerate() {
         if in_curve[i] {
             continue;
         }
@@ -817,13 +921,16 @@ pub(crate) fn extract_page_filtered(pdf: &Pdf, page: usize, settings: &Interpret
     let mut emit = |text: &mut PageText, ids: &[usize], line_of: &[u32], space_before: &[bool], quarter: Option<u8>| {
         let offset = text.line_of.last().map_or(0, |line| line.saturating_add(1));
         for ((&i, &line), &space) in ids.iter().zip(line_of).zip(space_before) {
-            let Some(mut g) = slots.get_mut(i).and_then(Option::take) else { continue };
-            if let Some(quarter) = quarter {
-                g.rect = from_upright(to_upright(g.rect, quarter, w, h), quarter, w, h);
+            let Some(g) = slots.get_mut(i).and_then(Option::take) else { continue };
+            let parts = precise.remove(&i).unwrap_or_else(|| vec![g]);
+            for (part, mut g) in parts.into_iter().enumerate() {
+                if let Some(quarter) = quarter {
+                    g.rect = from_upright(to_upright(g.rect, quarter, w, h), quarter, w, h);
+                }
+                text.glyphs.push(g);
+                text.line_of.push(line.saturating_add(offset));
+                text.space_before.push(part == 0 && space);
             }
-            text.glyphs.push(g);
-            text.line_of.push(line.saturating_add(offset));
-            text.space_before.push(space);
         }
     };
     for flow in flows {
@@ -870,7 +977,7 @@ fn arrange_flow(glyphs: &[Drawn], ids: Vec<usize>, rects: Vec<[f32; 4]>, quarter
 fn unrolled<'g>(run: impl Iterator<Item = &'g Drawn>) -> Vec<[f32; 4]> {
     let mut pen = [0.0, 0.0];
     let mut previous: Option<([f64; 2], [f64; 4])> = None;
-    run.map(|(_, u, g)| {
+    run.map(|(_, u, g, _)| {
         let b = along_baseline(&g.quad, *u);
         if let Some((pu, pb)) = previous {
             let at = along_baseline(&g.quad, pu);
@@ -1871,6 +1978,59 @@ mod tests {
         extract_page(pdf, page, &InterpreterSettings::default()).unwrap()
     }
 
+    fn generated_arabic_text(logical: &str, width: f64) -> PageText {
+        use pdfcraft_cos::{Dict, Document, Object, SaveOptions, Stream, write_full};
+        let mut doc = Document::new_empty();
+        let pages = doc.get(doc.root().unwrap()).as_dict().unwrap().reference(b"Pages").unwrap();
+        let lines = pdfcraft_fonts::appearance_text::wrap(logical, 20.0, width).unwrap();
+        let (content, fonts) = pdfcraft_fonts::appearance_text::draw(&lines, 20.0, [30.0, 30.0, 30.0 + width, 270.0], 2, [0.0; 3]).unwrap();
+        let fonts = pdfcraft_fonts::appearance_text::materialize_fonts(&mut doc, &fonts);
+        let content = doc.add(Stream::from_raw(Dict::new(), content));
+        let mut resources = Dict::new();
+        resources.set(b"Font".to_vec(), Object::Dict(fonts));
+        let mut page = Dict::new();
+        page.set(b"Type".to_vec(), Object::name("Page"));
+        page.set(b"Parent".to_vec(), Object::Ref(pages));
+        page.set(b"MediaBox".to_vec(), Object::Array([0, 0, 600, 300].map(Object::Int).to_vec()));
+        page.set(b"Resources".to_vec(), Object::Dict(resources));
+        page.set(b"Contents".to_vec(), Object::Ref(content));
+        let page = doc.add(page);
+        let mut tree = doc.get(pages).as_dict().unwrap().clone();
+        tree.set(b"Kids".to_vec(), Object::Array(vec![Object::Ref(page)]));
+        tree.set(b"Count".to_vec(), Object::Int(1));
+        doc.set(pages, tree);
+        let bytes = write_full(&doc, &SaveOptions::default()).unwrap();
+        marked_text(&Pdf::new(std::sync::Arc::new(bytes)).unwrap(), 0)
+    }
+
+    #[test]
+    fn generated_arabic_actual_text_keeps_word_and_substring_selection_precise() {
+        if pdfcraft_fonts::document_arabic_font().is_none() {
+            return;
+        }
+        for logical in ["البداية سلام النهاية", "مرحبا English 123 عالم ٤٥٦ النهاية", "باب باب بوب 123 باب 123"]
+        {
+            let page = generated_arabic_text(logical, 500.0);
+            assert_eq!(page.plain_text(), logical);
+            let line = page.line_rects(0..page.glyphs.len())[0];
+            for word in logical.split_whitespace() {
+                for range in page.find(word) {
+                    assert_eq!(page.text_of(range.clone()), word, "word selection: {logical:?}, {word:?}");
+                    let (a, b) = page.word_at(range.start).unwrap();
+                    assert_eq!(page.text_of(a..b + 1), word, "double click: {word:?}");
+                    let boxes = page.line_rects(range);
+                    assert_eq!(boxes.len(), 1);
+                    assert!(boxes[0][2] - boxes[0][0] < (line[2] - line[0]) * 0.6, "word highlights the whole line: {word:?}");
+                }
+            }
+            if logical.contains("English") {
+                let range = page.find("ngli").remove(0);
+                assert_eq!(page.text_of(range.clone()), "ngli");
+                assert!(page.line_rects(range)[0][2] - page.line_rects(page.find("English")[0].clone())[0][0] < 100.0);
+            }
+        }
+    }
+
     #[test]
     fn text_after_an_inline_image_survives_a_non_ascii_byte_before_a_later_ei() {
         // Everyday content both ways: a string with a byte above 0x7F, and a later word holding
@@ -1918,7 +2078,7 @@ mod tests {
         const N: usize = 100_000;
         let glyph = |text: &str| {
             let quad = [[100.0, 110.0], [110.0, 110.0], [110.0, 100.0], [100.0, 100.0]];
-            (0, [1.0, 0.0], TextGlyph { text: text.into(), rect: [100.0, 100.0, 110.0, 110.0], quad, direction: [1.0, 0.0] })
+            (0, [1.0, 0.0], TextGlyph { text: text.into(), rect: [100.0, 100.0, 110.0, 110.0], quad, direction: [1.0, 0.0] }, None)
         };
         let mut dev = TextDevice::new();
         // A genuine redraw first: it is still deduplicated within the budget.

@@ -534,10 +534,12 @@ fn thai_error(e: GlyphError, text: &str) -> EditError {
     })
 }
 
-/// The box a text item occupies (height from its lines).
+/// The box a text item occupies (height from its lines). Text the shaped writer draws (Arabic
+/// or Hebrew with a face, invisible controls, and all Thai, as [`draw`] routes it) takes the
+/// heights of the rows that writer lays out, which grow for stacked and positioned marks.
 pub fn text_rect(t: &AddedText) -> [f64; 4] {
     let r = norm(t.rect);
-    let h = if shaped_by_a_face(t) {
+    let h = if shaped_by_a_face(t) || t.text.chars().any(is_thai) {
         laid_lines(t)
             .map(|laid| {
                 laid.iter()

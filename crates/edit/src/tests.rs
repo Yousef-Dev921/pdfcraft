@@ -6586,6 +6586,21 @@ fn arabic_fallback_keeps_the_paragraphs_line_pitch_when_it_wraps_to_more_rows() 
     }
 }
 
+/// A soft hyphen in an edit of plain Latin text doesn't make it "complex text": the paragraph
+/// is still written with its own standard font (WinAnsi has the soft hyphen), as before the
+/// Arabic work, instead of being refused for want of a complete source face.
+#[test]
+fn latin_edits_with_invisible_formatting_characters_keep_the_source_font_path() {
+    for draft in ["A co\u{00ad}operative sentence", "A cooperative sentence"] {
+        let mut doc = text_page("BT /F1 12 Tf 72 700 Td (A cooperative paragraph) Tj ET");
+        let edit = text::replace_block(&mut doc, 0, 0, draft);
+        assert!(edit.is_ok(), "{draft:?}: {edit:?}");
+        let doc = reopen(&doc);
+        let text = text::text_blocks(&doc, 0).unwrap()[0].text.clone();
+        assert!(text.contains("operative sentence"), "{draft:?} read back as {text:?}");
+    }
+}
+
 /// The faces page `page` shows text in: each `Tf` font's `/BaseFont`, or a Type 3 font's
 /// descriptor `/FontName`.
 fn shown_faces(doc: &Document, page: usize) -> std::collections::BTreeSet<String> {

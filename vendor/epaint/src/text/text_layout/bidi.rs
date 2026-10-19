@@ -570,6 +570,23 @@ mod tests {
         );
     }
 
+    /// A short right-to-left row under the default left alignment sits at the right end of its
+    /// wrap width, and the galley's rect still starts at the origin and spans that width, so a
+    /// `Label` that allocates the galley's size and paints it at its left top keeps the ink
+    /// inside the space it allocated.
+    #[test]
+    fn a_short_right_to_left_row_stays_inside_the_galley_rect() {
+        let Some(galley) = galley("سلام", 200.0) else {
+            return;
+        };
+        let row = &galley.rows[0];
+        assert!(row.pos.x > 0.0, "the row is set against the right end: {:?}", row.pos);
+        assert_eq!(galley.rect.min.x, 0.0);
+        assert!((galley.rect.max.x - 200.0).abs() < 0.5, "{:?}", galley.rect);
+        // Within the half pixel a row's rounded width may add.
+        assert!(row.rect().max.x <= galley.rect.max.x + 1.0, "row {:?} in galley {:?}", row.rect(), galley.rect);
+    }
+
     #[test]
     fn bidi_caret_hit_testing_and_arrows_use_source_indices() {
         let Some(galley) = galley("ببب", f32::INFINITY) else {

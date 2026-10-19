@@ -45,6 +45,10 @@ impl ShapedScript {
 }
 
 fn face(script: ShapedScript) -> Option<&'static (FontRef<'static>, ShaperData)> {
+    // The bold instance is the regular face's program at another location. Set the shared cell
+    // up from the regular face: asking for the bold one would initialise it from inside its own
+    // initialiser (`bold_instance` reads this cell), which never returns.
+    let script = if script == ShapedScript::ArabicBold { ShapedScript::Arabic } else { script };
     static FACE: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
     static HEBREW: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
     static THAI: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();

@@ -1393,6 +1393,31 @@ pub(crate) fn install_source_fonts(ctx: &egui::Context, doc: &pdfcraft_engine::D
     families
 }
 
+/// Whether the installed document face `name` shapes `span`, joined forms included. The answer
+/// is remembered per face and span (at most 512 of them), so laying the editor out on every
+/// frame does not reshape unchanged text.
+fn shapes_with(ui: &egui::Ui, name: &str, span: &str) -> bool {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (name, span).hash(&mut hasher);
+    let key = hasher.finish();
+    let id = egui::Id::new("pdfcraft-source-shaping");
+    if let Some(known) = ui.data_mut(|d| d.get_temp_mut_or_default::<std::collections::HashMap<u64, bool>>(id).get(&key).copied()) {
+        return known;
+    }
+    let shapes = ui.fonts(|fonts| {
+        fonts.definitions().font_data.get(name).is_some_and(|data| pdfcraft_fonts::source_shaping::shape(data.font.as_ref(), span).is_ok())
+    });
+    ui.data_mut(|d| {
+        let known = d.get_temp_mut_or_default::<std::collections::HashMap<u64, bool>>(id);
+        if known.len() >= 512 {
+            known.clear();
+        }
+        known.insert(key, shapes);
+    });
+    shapes
+}
+
 fn editor_job(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: f32) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     // An unchanged PDF row already has an authoritative line break. Do not rewrap it
@@ -1438,19 +1463,10 @@ fn editor_job(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: f32
             let mut font = editor_font(&look, (look.size as f32 * scale).clamp(1.0, 300.0));
             let original_face =
                 ed.look.family == ed.look0.family && !ed.family_chosen && ed.look.bold == ed.look0.bold && ed.look.italic == ed.look0.italic;
-            // A PDF subset can hold isolated letters while lacking the OpenType tables needed
-            // to join them. Use the document face only when it can shape the actual draft.
-            let embedded = original_face
-                && ed.fonts.get(&line.font).is_some_and(|name| {
-                    !complex
-                        || ui.fonts(|fonts| {
-                            fonts
-                                .definitions()
-                                .font_data
-                                .get(name)
-                                .is_some_and(|data| pdfcraft_fonts::source_shaping::shape(data.font.as_ref(), span).is_ok())
-                        })
-                });
+            // A PDF subset can hold isolated letters while lacking the OpenType tables or the
+            // joined forms needed to join them. Use the document face only when it can shape the
+            // actual draft (`source_shaping::shape` checks both).
+            let embedded = original_face && ed.fonts.get(&line.font).is_some_and(|name| !complex || shapes_with(ui, name, span));
             if embedded && let Some(name) = ed.fonts.get(&line.font) {
                 font.family = FontFamily::Name(name.clone().into());
             }

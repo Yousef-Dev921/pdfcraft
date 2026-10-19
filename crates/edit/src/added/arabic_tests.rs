@@ -469,3 +469,27 @@ fn vocalized_added_text_ink_fits_its_reported_height_after_drawing() {
     }
     assert!(checked > 0);
 }
+
+/// Thai is drawn by the shaped writer, whose rows grow for stacked marks (a vowel above with a
+/// tone mark over it); the box reported for the item is as tall as the rows it draws, so
+/// selection, hit testing and the resize handles cover the ink.
+#[test]
+fn a_thai_items_box_is_as_tall_as_the_rows_it_draws() {
+    if pdfcraft_fonts::document_thai_font().is_none() {
+        return;
+    }
+    let t = AddedText {
+        rect: [0.0, 0.0, 400.0, 300.0], text: "กิ่ ปู่ ผู้ใช้\nน้ำ ปั้น".into(), size: 40.0, ..AddedText::default()
+    };
+    let drawn: f64 = laid_lines(&t)
+        .unwrap()
+        .iter()
+        .map(|(_, _, pieces, _)| {
+            let extents = line_extents(pieces, |cluster| pdfcraft_fonts::appearance_text::cluster_ink_bounds(cluster).ok());
+            (extents[0] + extents[1]) * t.size
+        })
+        .sum();
+    let r = text_rect(&t);
+    assert!(drawn > 2.0 * 1.2 * t.size, "the fixture's stacked marks need more than the fixed row height: {drawn}");
+    assert!((r[3] - r[1] - drawn).abs() < 1e-6, "box {} for rows {drawn}", r[3] - r[1]);
+}

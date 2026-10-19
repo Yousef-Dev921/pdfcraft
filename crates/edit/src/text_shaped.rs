@@ -124,7 +124,26 @@ pub(super) fn rewrite(
         // Each edited row stays on its source row's baseline and against the edge it was set
         // against, so a heading and its subtitle keep their spacing.
         Some(positions) => appearance_text::draw_positioned(&laid, size, &positions, Some(color)),
-        None => appearance_text::draw(&laid, size, rect, alignment, color),
+        None => match source_pitch(block, lines) {
+            // A reflowed paragraph keeps its own line pitch where its rows have ink-safe room.
+            Some(pitch) => {
+                let mut positions = Vec::with_capacity(laid.len());
+                let mut y = top - size * laid.first().map_or(0.9, |line| line.ascent);
+                for (i, line) in laid.iter().enumerate() {
+                    if let Some(previous) = i.checked_sub(1).and_then(|p| laid.get(p)) {
+                        y -= pitch.max(size * (previous.descent + line.ascent));
+                    }
+                    let x = match alignment {
+                        1 => rect[0] + (rect[2] - rect[0] - line.width) / 2.0,
+                        2 => rect[2] - line.width,
+                        _ => rect[0],
+                    };
+                    positions.push([x, y]);
+                }
+                appearance_text::draw_positioned(&laid, size, &positions, Some(color))
+            }
+            None => appearance_text::draw(&laid, size, rect, alignment, color),
+        },
     };
     let (content, template) = drawn.map_err(|_| EditError::Invalid("the Arabic paragraph's glyphs exceed the drawing limits".into()))?;
     let inverse = Matrix(first.origin.ctm).invert().ok_or_else(|| EditError::Invalid("the paragraph has a singular transform".into()))?;
@@ -221,6 +240,19 @@ pub(super) fn rewrite(
         dict.set(b"Resources".to_vec(), Object::Dict(resources));
     })?;
     Ok(LineEdit { substituted: pdfcraft_fonts::document_arabic_font().map(|font| format!("{} Type3", font.family)) })
+}
+
+/// The distance between a paragraph's evenly spaced source rows of one size, when it has two
+/// or more (`None` for one row, mixed sizes or uneven rows).
+fn source_pitch(block: &TextBlock, lines: &[TextLine]) -> Option<f64> {
+    let firsts: Vec<&TextLine> = block.rows.iter().map(|row| row.first().and_then(|i| lines.get(*i))).collect::<Option<_>>()?;
+    let (first, last) = (firsts.first()?, firsts.last()?);
+    if firsts.len() < 2 || firsts.iter().any(|l| (l.size - first.size).abs() > 0.01) {
+        return None;
+    }
+    let pitch = (first.origin.baseline - last.origin.baseline) / (firsts.len() - 1) as f64;
+    let even = firsts.windows(2).all(|pair| ((pair[0].origin.baseline - pair[1].origin.baseline) - pitch).abs() <= first.size * 0.1);
+    (even && pitch.is_finite() && pitch > 0.0 && pitch <= first.size * 4.0).then_some(pitch)
 }
 
 /// [`TextBlock::edited_spans`], except that a draft row replaced as a whole keeps its own source

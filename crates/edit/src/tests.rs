@@ -6512,6 +6512,80 @@ fn a_right_to_left_row_of_separate_runs_is_one_row() {
     assert!(blocks.iter().any(|b| b.editor_text == "Left to right" && b.rows.len() == 1), "{blocks:?}");
 }
 
+/// A right-to-left row as browsers print it: the runs drawn from left to right, each letter
+/// with tanween in its own `/ActualText` cluster whose mark is drawn first and raised, and a
+/// bold Latin word between Arabic runs. It reads back as one row in typing order: the
+/// clusters stay in their words ("خصوصًا", not "صً" on its own), the runs read right to left
+/// with the Latin word kept left to right, and the space Chrome draws at the end of the bold
+/// run stays between the words it separates.
+#[test]
+fn a_browser_printed_right_to_left_row_reads_as_one_row_in_typing_order() {
+    // Codes: A ا, B ب, C ص, D و, E خ, F ،, G س, H م, M fathatan (no advance), space.
+    let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapType 2 def \
+                1 begincodespacerange <00> <FF> endcodespacerange 10 beginbfchar <20> <0020> \
+                <41> <0627> <42> <0628> <43> <0635> <44> <0648> <45> <062E> <46> <060C> <47> <0633> \
+                <48> <0645> <4D> <064B> endbfchar endcmap CMapName currentdict /CMap defineresource pop end end";
+    let widths: Vec<_> = (32..=77)
+        .map(|c| {
+            if c == 32 {
+                "250"
+            } else if c == 77 {
+                "0"
+            } else {
+                "500"
+            }
+        })
+        .collect();
+    // Left to right: "با ا", the cluster ص + fathatan, "وصخ ،", bold "SECA ", "مس".
+    let content = "BT /F1 12 Tf 100 700 Td (BA A) Tj ET \
+                   /Span <</ActualText <FEFF0635064B>>> BDC BT /F1 12 Tf 1 0 0 1 121 704 Tm (M) Tj 1 0 0 1 121 700 Tm (C) Tj ET EMC \
+                   BT /F1 12 Tf 127 700 Td (DCE F) Tj ET \
+                   BT /F2 12 Tf 154 700 Td (SECA ) Tj ET \
+                   BT /F1 12 Tf 190.672 700 Td (HG) Tj ET";
+    let doc = build(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 7 0 R >> >> >>",
+        &stream("", content),
+        &format!(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /FakeArabic /FirstChar 32 /LastChar 77 /Widths [{}] /ToUnicode 6 0 R >>",
+            widths.join(" ")
+        ),
+        &stream("", cmap),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
+    ]);
+    let blocks = text::text_blocks(&doc, 0).unwrap();
+    assert_eq!(blocks.len(), 1, "{blocks:?}");
+    assert_eq!(blocks[0].rows.len(), 1, "{blocks:?}");
+    assert_eq!(blocks[0].editor_text, "سم SECA، خصوصًا اب", "{blocks:?}");
+    // The Arabic runs either side of the cluster are one line with it; the bold word is its own run.
+    let lines = text::text_lines(&doc, 0).unwrap();
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(lines.iter().any(|l| l.text == "، خصوصًا اب"), "{lines:?}");
+}
+
+/// A paragraph that wraps to more rows than it had keeps its own line pitch in the Arabic
+/// fallback (the report's body is set at about twice its size), not the tightest ink-safe one.
+#[test]
+fn arabic_fallback_keeps_the_paragraphs_line_pitch_when_it_wraps_to_more_rows() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        return;
+    }
+    let mut doc = text_page("BT /F1 12 Tf 300 700 Td (The first row of a paragraph) Tj ET BT /F1 12 Tf 300 676 Td (and the second row of it) Tj ET");
+    let before = text::text_blocks(&doc, 0).unwrap();
+    assert_eq!(before.len(), 1, "{before:?}");
+    let draft = "فقرة عربية طويلة تلتف على أكثر من سطرين داخل عرض الفقرة نفسه حتى نرى المسافة بين الأسطر بعد التعديل والحفظ";
+    text::replace_block(&mut doc, 0, 0, draft).unwrap();
+    let doc = reopen(&doc);
+    let mut rows: Vec<f64> = text::text_lines(&doc, 0).unwrap().iter().map(|l| l.rect[1]).collect();
+    rows.sort_by(|a, b| b.total_cmp(a));
+    rows.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+    assert!(rows.len() >= 3, "{rows:?}");
+    for pair in rows.windows(2) {
+        assert!((pair[0] - pair[1] - 24.0).abs() < 0.5, "rows {rows:?} keep the source pitch of 24 pt");
+    }
+}
+
 /// The faces page `page` shows text in: each `Tf` font's `/BaseFont`, or a Type 3 font's
 /// descriptor `/FontName`.
 fn shown_faces(doc: &Document, page: usize) -> std::collections::BTreeSet<String> {

@@ -60,11 +60,14 @@ Existing Arabic document text prefers a validated complete source font. Uniform 
 paragraphs retain their bidi context across wrapped rows, break overwide words at grapheme
 boundaries and keep logical spaces and `/ActualText` through save/reopen. A saved paragraph's
 different CID maps for the same full program remain editable as one source face. Mixed
-contextual font/style ranges still require a uniform paragraph; the reported Noto Sans Arabic
-Type3 fallback is limited to upright Regular source text. Bundled Arabic appearance fallback
-also uses the Regular face; it does not synthesize Arabic bold or italic. A validated complete
-source face retains its actual outlines and available weight. Bold/italic fallback, shaped style
-ranges and arbitrary producer grouping remain incomplete.
+contextual font/style ranges in one full-face paragraph still require a uniform paragraph.
+When the source faces cannot draw the edit, the reported Noto Sans Arabic Type3 fallback redraws
+upright source text run by run: every run keeps its size, colour and weight (bold from the
+variable face's `wght` 700 instance; Latin in the matching standard Helvetica face, oblique
+kept, Arabic upright), and unchanged rows keep their baselines and shared edge. Annotation and
+form appearances still use the Regular face. A validated complete source face retains its
+actual outlines and available weight. Shaped style ranges, keeping mixed styles inside one row
+across a second edit, and arbitrary producer grouping remain incomplete.
 
 The `full_arabic_source_` edit regressions run with the required approved `CRAFT_FONTS_DIR`
 input. Their complete static default face is built in memory from that input's default

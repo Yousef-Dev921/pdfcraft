@@ -84,11 +84,19 @@ update the numbers.
 
 - **Arabic progress (2026-10-18):** text fields now keep logical Unicode source offsets while
   the shared native layout resolves bidi runs, shaping, wrapping, caret movement and selection.
-  Existing upright text with a uniform style can use the reported Noto Sans Arabic fallback
-  when its source subset lacks replacement glyphs; save/reopen regressions retain logical text,
-  the right anchor and neighbouring source runs. This is a bounded fallback, not general Arabic
-  document editing: mixed font/style contextual runs, bold/italic fallback, shaped style ranges,
-  rotated text and arbitrary producer grouping remain open.
+  Existing upright text can use the reported Noto Sans Arabic fallback when its source subset
+  lacks replacement glyphs, including paragraphs whose rows or runs differ in size, colour,
+  weight and font (a heading over its subtitle, a label beside its value, as browsers print
+  them): each run keeps its look, bold takes the variable face's `wght` 700 instance, oblique
+  Latin keeps its slant (Arabic stays upright), unchanged rows keep their baselines and a reflowed paragraph keeps its line pitch.
+  Right-to-left rows drawn as several runs read back as one row in typing order, including
+  browser-printed justified paragraphs: runs drawn left to right read from the right with
+  embedded Latin runs kept in order, and each letter-with-tanween `/ActualText` cluster (drawn
+  mark first, above the baseline) stays inside its word. Save/reopen regressions retain
+  logical text, the right anchor and neighbouring source runs. This is a bounded fallback, not
+  general Arabic document editing: Latin runs are redrawn in the standard Helvetica faces, a
+  re-edited row that mixes styles takes the style of its first run, shaped style ranges, rotated
+  text and arbitrary producer grouping remain open.
 
 - **Fork progress (2026-10-11):** compatible words and subset-font spaces form lines;
   source fonts lacking a space glyph remain reusable; inline editing previews remove source

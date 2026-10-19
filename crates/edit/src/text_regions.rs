@@ -200,6 +200,68 @@ fn reading_gap(prev: &TextLine, line: &TextLine) -> f64 {
     }
 }
 
+/// Puts a right-to-left row drawn as runs from left to right (as browsers print) in reading
+/// order: its runs read from the right, while consecutive left-to-right runs (a Latin word, a
+/// number) keep their drawn order. Each line already holds its own text in typing order.
+/// Returns the left-to-right runs set inside the row, whose edge spaces read on the other side.
+fn read_from_the_right(row: &mut [usize], lines: &[TextLine]) -> Vec<usize> {
+    let text = |i: usize| lines.get(i).map_or("", |l| l.text.as_str());
+    let left = |i: usize| lines.get(i).map_or(0.0, |l| l.frame_rect()[0]);
+    let whole: String = row.iter().map(|i| text(*i)).collect();
+    if row.len() < 2 || !crate::bidi::rtl_base(&whole) || !row.windows(2).all(|w| left(w[1]) >= left(w[0])) {
+        return Vec::new();
+    }
+    // Left to right: Latin letters or digits and no Arabic or Hebrew letters. A run with
+    // neither (punctuation, spaces) goes with its neighbours when both read left to right.
+    let strong = |i: usize| {
+        let t = text(i);
+        if t.chars().any(|c| crate::bidi::is_rtl(c) && c.is_alphabetic()) {
+            Some(false)
+        } else if t.chars().any(|c| c.is_alphanumeric()) {
+            Some(true)
+        } else {
+            None
+        }
+    };
+    let kinds: Vec<Option<bool>> = row.iter().map(|i| strong(*i)).collect();
+    let ltr: Vec<bool> = (0..kinds.len())
+        .map(|k| match kinds.get(k).copied().flatten() {
+            Some(ltr) => ltr,
+            None => {
+                let before = kinds.get(..k).and_then(|b| b.iter().rev().find_map(|k| *k));
+                let after = kinds.get(k + 1..).and_then(|a| a.iter().find_map(|k| *k));
+                before == Some(true) && after == Some(true)
+            }
+        })
+        .collect();
+    let set: Vec<usize> = row.iter().zip(&ltr).filter(|(_, l)| **l).map(|(i, _)| *i).collect();
+    row.reverse();
+    let mut k = 0;
+    while k < row.len() {
+        if row.get(k).is_some_and(|i| set.contains(i)) {
+            let start = k;
+            while row.get(k).is_some_and(|i| set.contains(i)) {
+                k += 1;
+            }
+            if let Some(group) = row.get_mut(start..k) {
+                group.reverse();
+            }
+        } else {
+            k += 1;
+        }
+    }
+    set
+}
+
+/// A left-to-right run's text as it reads inside a right-to-left row: a space drawn at its
+/// right end separates it from the text before it, so it comes first (and the reverse).
+fn embedded_reading(text: &str) -> String {
+    let core = text.trim_matches(char::is_whitespace);
+    let lead = text.get(..text.len() - text.trim_start_matches(char::is_whitespace).len()).unwrap_or_default();
+    let trail = text.get(text.trim_end_matches(char::is_whitespace).len()..).unwrap_or_default();
+    format!("{trail}{core}{lead}")
+}
+
 fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
     let mut rows: Vec<Vec<usize>> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
@@ -238,6 +300,12 @@ fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
             row.push(i);
         } else {
             rows.push(vec![i]);
+        }
+    }
+    let mut embedded = std::collections::HashSet::new();
+    if mixed {
+        for row in &mut rows {
+            embedded.extend(read_from_the_right(row, lines));
         }
     }
     let mut blocks: Vec<TextBlock> = Vec::new();
@@ -302,19 +370,24 @@ fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
         }
         for &index in &row {
             let Some(line) = lines.get(index) else { continue };
+            let reading = if embedded.contains(&index) {
+                std::borrow::Cow::Owned(embedded_reading(&line.text))
+            } else {
+                std::borrow::Cow::Borrowed(line.text.as_str())
+            };
             // Some producers position separate words without encoding a space.
             if let Some(prev) = block.lines.last().filter(|i| row.contains(i)).and_then(|i| lines.get(*i))
                 && !row_text.ends_with(char::is_whitespace)
-                && !line.text.starts_with(char::is_whitespace)
+                && !reading.starts_with(char::is_whitespace)
                 && reading_gap(prev, line) > line.size * 0.12
             {
                 row_text.push(' ');
                 block.editor_text.push(' ');
             }
             let start = block.editor_text.len();
-            block.editor_text.push_str(&line.text);
+            block.editor_text.push_str(&reading);
             block.spans.push((start..block.editor_text.len(), index));
-            row_text.push_str(&line.text);
+            row_text.push_str(&reading);
             block.invisible &= line.origin.state.render_mode == 3;
             block.lines.push(index);
         }

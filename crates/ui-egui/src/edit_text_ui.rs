@@ -1357,6 +1357,9 @@ pub(crate) fn page_input(
 /// One TextEdit lays out all source runs; its caret and selection span the whole region.
 pub(crate) fn install_source_fonts(ctx: &egui::Context, doc: &pdfcraft_engine::Document, page: usize) -> BTreeMap<String, String> {
     let programs = doc.text_editor_fonts(page);
+    // The `pdf-source-N` names are about to stand for this page's programs: answers remembered
+    // for the programs they named before no longer hold.
+    ctx.data_mut(|d| d.remove::<std::collections::HashMap<u64, bool>>(shaping_cache()));
     let mut definitions = ctx.fonts(|f| f.definitions().clone());
     // Only the current editor's document fonts live in the atlas. Never accumulate the
     // programs of previously opened files or add them to the interface's default families.
@@ -1393,6 +1396,11 @@ pub(crate) fn install_source_fonts(ctx: &egui::Context, doc: &pdfcraft_engine::D
     families
 }
 
+/// Where [`shapes_with`] remembers its answers, cleared by [`install_source_fonts`].
+fn shaping_cache() -> egui::Id {
+    egui::Id::new("pdfcraft-source-shaping")
+}
+
 /// Whether the installed document face `name` shapes `span`, joined forms included. The answer
 /// is remembered per face and span (at most 512 of them), so laying the editor out on every
 /// frame does not reshape unchanged text.
@@ -1401,7 +1409,7 @@ fn shapes_with(ui: &egui::Ui, name: &str, span: &str) -> bool {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (name, span).hash(&mut hasher);
     let key = hasher.finish();
-    let id = egui::Id::new("pdfcraft-source-shaping");
+    let id = shaping_cache();
     if let Some(known) = ui.data_mut(|d| d.get_temp_mut_or_default::<std::collections::HashMap<u64, bool>>(id).get(&key).copied()) {
         return known;
     }
@@ -1904,6 +1912,25 @@ mod tests {
             extras0: Extras::default(),
         };
         (app, ed)
+    }
+
+    /// Installing a page's source fonts gives the `pdf-source-N` names other programs, so the
+    /// shaping answers remembered for the previous ones are dropped.
+    #[test]
+    fn installing_source_fonts_forgets_shaping_answers_for_the_old_programs() {
+        let (app, _) = preview_app();
+        let doc = app.session.get(app.views[0].id).unwrap();
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::theme::font_definitions());
+        ctx.run_ui(Default::default(), |ui| {
+            let cache =
+                |ctx: &egui::Context| ctx.data_mut(|d| d.get_temp_mut_or_default::<std::collections::HashMap<u64, bool>>(shaping_cache()).len());
+            ui.ctx().data_mut(|d| d.get_temp_mut_or_default::<std::collections::HashMap<u64, bool>>(shaping_cache()).insert(7, true));
+            assert_eq!(cache(ui.ctx()), 1);
+            install_source_fonts(ui.ctx(), doc, 0);
+            assert_eq!(cache(ui.ctx()), 0, "an answer for an earlier pdf-source program survived");
+        })
+        .drop_without_applying_deltas();
     }
 
     #[test]

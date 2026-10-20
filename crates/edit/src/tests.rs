@@ -7037,6 +7037,27 @@ fn full_arabic_source_refuses_coincident_text_clips_without_mutation() {
     }
 }
 
+/// Arabic the source font cannot draw is retried with the Arabic fallback when the source path
+/// refuses, so that path must refuse clipping-path text too (#3429): the mask stays, the PDF is
+/// unchanged, and the reason is the clipping path, for every mode and the two shapes of #3447.
+#[test]
+fn arabic_fallback_refuses_clipping_path_text_without_mutation() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        return;
+    }
+    let mut contents: Vec<String> =
+        [4, 5, 6, 7].iter().map(|mode| format!("q\nBT {mode} Tr /F1 48 Tf 40 60 Td (MASK) Tj ET\n1 0 0 rg 0 0 300 150 re f\nQ\n")).collect();
+    contents.push("q\nBT /F1 48 Tf 40 60 Td 0 Tr (TITLE) Tj 7 Tr (MASK) Tj ET\n1 0 0 rg 0 0 300 150 re f\nQ\n".into());
+    contents.push("q\nBT 0 Tr /F1 48 Tf 40 60 Td (MASK) Tj ET\nBT 7 Tr /F1 48 Tf 40 60 Td (MASK) Tj ET\n1 0 0 rg 0 0 300 150 re f\nQ\n".into());
+    for content in contents {
+        let mut doc = text_page(&content);
+        let before = write_incremental(&doc, &SaveOptions::default()).unwrap();
+        let block = text::replace_block(&mut doc, 0, 0, "نص عربي");
+        assert!(matches!(&block, Err(EditError::Invalid(m)) if m.contains("clipping path")), "{content:?}: {block:?}");
+        assert_eq!(write_incremental(&doc, &SaveOptions::default()).unwrap(), before, "refused clipping text changed the PDF: {content:?}");
+    }
+}
+
 #[test]
 fn arabic_fallback_refuses_stroked_source_and_coincident_copies_without_mutation() {
     if pdfcraft_fonts::document_arabic_font().is_none() {

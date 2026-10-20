@@ -485,7 +485,10 @@ pub(super) fn layout(fonts: &mut FontsImpl, pixels_per_point: f32, job: Arc<Layo
                 }
             }
             let x = if job.halign == Align::LEFT && rtl && max_width.is_finite() {
-                (max_width - shaped.size.x).max(0.0)
+                // Against the wrap width itself, not the half point `effective_wrap_width` adds
+                // for breaking: a row set there reached past the galley's rect, the label past the
+                // width it was given, and a panel of Arabic labels widened frame after frame.
+                (job.wrap.max_width.min(max_width) - shaped.size.x).max(0.0)
             } else {
                 -job.halign.to_factor() * shaped.size.x
             };
@@ -583,8 +586,9 @@ mod tests {
         assert!(row.pos.x > 0.0, "the row is set against the right end: {:?}", row.pos);
         assert_eq!(galley.rect.min.x, 0.0);
         assert!((galley.rect.max.x - 200.0).abs() < 0.5, "{:?}", galley.rect);
-        // Within the half pixel a row's rounded width may add.
-        assert!(row.rect().max.x <= galley.rect.max.x + 1.0, "row {:?} in galley {:?}", row.rect(), galley.rect);
+        // Within the 1/32 point a row's width is rounded to, not the half point
+        // `effective_wrap_width` adds for breaking: a row set there ended past the galley.
+        assert!(row.rect().max.x <= galley.rect.max.x + 0.05, "row {:?} in galley {:?}", row.rect(), galley.rect);
     }
 
     #[test]

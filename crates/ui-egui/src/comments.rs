@@ -2018,7 +2018,13 @@ pub fn swatch_grid(ui: &mut egui::Ui, current: Option<Rgb>) -> Option<Rgb> {
     let open_id = base.with("other-colour");
     let value_id = open_id.with("value");
     let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
-    egui::Grid::new(base.with("swatches")).spacing(vec2(6.0, 6.0)).show(ui, |ui| {
+    // Five swatches and "Other colour" a row, each 22 points: spaced as far as 24 points apart,
+    // and closer (to 6) rather than wider than the parent. egui's 40 point minimum column made
+    // the grid wider than the Edit text panel, which then laid out everything below it against
+    // an edge it clips.
+    let room = ui.available_width() - 6.0 * 22.0;
+    let gap = if room.is_finite() { (room / 5.0).clamp(6.0, 24.0) } else { 24.0 };
+    egui::Grid::new(base.with("swatches")).spacing(vec2(gap, 6.0)).min_col_width(22.0).show(ui, |ui| {
         for (i, (name, c)) in SWATCHES.iter().enumerate() {
             if swatch(ui, *c, on(c), tl!(name)).clicked() {
                 picked = Some(*c);
@@ -2337,6 +2343,28 @@ mod tests {
         plus[0].click();
         h.run();
         assert_eq!(h.query_all_by_label("Apply").count(), 1, "only the first grid's picker opens");
+    }
+
+    /// The grid's columns took egui's 40 point minimum though a swatch is 22 wide, so six of
+    /// them made a 270 point grid in the 246 points of the Edit text panel. The panel's column
+    /// widened to fit, and everything under the grid was laid out against an edge the panel
+    /// clips: right-aligned Arabic lost its first letters. Where there is room, the swatches
+    /// keep their spacing.
+    #[test]
+    fn the_swatch_grid_fits_the_width_it_is_given() {
+        for (width, gap) in [(246.0, 22.8), (400.0, 24.0)] {
+            let mut h = egui_kittest::Harness::builder().with_size(vec2(width + 40.0, 300.0)).build_ui(|ui| {
+                ui.set_max_width(width);
+                let _ = swatch_grid(ui, None);
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("grid-test"), ui.min_rect().width()));
+            });
+            h.run();
+            let used: f32 = h.ctx.data(|d| d.get_temp(egui::Id::new("grid-test"))).unwrap_or(f32::INFINITY);
+            assert!(used <= width, "a {width} point column holds a {used} point grid");
+            use egui_kittest::kittest::Queryable;
+            let [first, second] = ["Yellow", "Orange"].map(|name| h.get_by_label(name).rect().left());
+            assert!(((second - first) - (22.0 + gap)).abs() < 1.0, "{width}: the swatches are {} apart", second - first);
+        }
     }
 
     #[test]

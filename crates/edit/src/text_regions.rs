@@ -192,12 +192,14 @@ fn starts_list_item(row: &[usize], lines: &[TextLine]) -> bool {
 /// when either reads right to left and `line` does not continue to the right, to its left. A
 /// right-to-left row drawn as several runs (Arabic beside a Latin word or number) is one row.
 fn reading_gap(prev: &TextLine, line: &TextLine) -> f64 {
+    if reads_from_right(prev, line) { prev.frame_rect()[0] - line.frame_rect()[2] } else { line.frame_rect()[0] - prev.frame_rect()[2] }
+}
+
+/// Whether [`reading_gap`] measures from `line` leftwards to `prev`: either reads right to left and
+/// `line` does not continue to the right.
+fn reads_from_right(prev: &TextLine, line: &TextLine) -> bool {
     let forward = line.frame_rect()[0] - prev.frame_rect()[2];
-    if forward < -prev.size.min(line.size) * 0.2 && (crate::bidi::rtl_base(&prev.text) || crate::bidi::rtl_base(&line.text)) {
-        prev.frame_rect()[0] - line.frame_rect()[2]
-    } else {
-        forward
-    }
+    forward < -prev.size.min(line.size) * 0.2 && (crate::bidi::rtl_base(&prev.text) || crate::bidi::rtl_base(&line.text))
 }
 
 /// Puts a right-to-left row drawn as runs from left to right (as browsers print) in reading
@@ -280,9 +282,13 @@ fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
                 // distinctly smaller or larger one, with no horizontal overlap (`gap >= 0.0`):
                 // two equal-size runs can land within it too, at a baseline shift tight columns
                 // or compressed text (`Tz`) can produce between genuinely separate rows, and the
-                // original 20% tolerance is what keeps those apart.
+                // original 20% tolerance is what keeps those apart. It stays left to right: read
+                // from the right, a small label set beside a right-to-left heading (a section
+                // number in its own box) would join the heading, and a rewrite of that row would
+                // close the gap between them.
                 && ((prev.frame_origin().1 - line.frame_origin().1).abs() < prev.size.min(line.size) * 0.2
                     || (gap >= 0.0
+                        && !reads_from_right(prev, line)
                         && prev.size.min(line.size) < prev.size.max(line.size) * 0.9
                         && (prev.frame_origin().1 - line.frame_origin().1).abs() < prev.size.max(line.size) * 0.5))
                 && gap >= -prev.size.min(line.size) * 0.2

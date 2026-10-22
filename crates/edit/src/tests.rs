@@ -6512,6 +6512,35 @@ fn a_right_to_left_row_of_separate_runs_is_one_row() {
     assert!(blocks.iter().any(|b| b.editor_text == "Left to right" && b.rows.len() == 1), "{blocks:?}");
 }
 
+/// A section number in its own small box beside a right-to-left heading (as a report prints
+/// "01" right of "الملخص التنفيذي") stays its own paragraph. Read from the right, the wider
+/// tolerance for a superscript beside larger text (#3252) joined the two, and a rewrite of the
+/// heading then closed the gap to the box and took the next paragraph in on the next read.
+#[test]
+fn a_section_number_beside_a_right_to_left_heading_stays_apart() {
+    let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapType 2 def \
+                1 begincodespacerange <00> <FF> endcodespacerange 2 beginbfchar <41> <0633> <42> <0645> \
+                endbfchar endcmap CMapName currentdict /CMap defineresource pop end end";
+    let widths: Vec<_> = (32..=88).map(|c| if c == 32 { "250" } else { "500" }).collect();
+    // "01" at 9 pt, 2.5 pt above the 16 pt heading's baseline and 16 pt right of it.
+    let doc = build(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 7 0 R >> >> >>",
+        &stream("", "BT /F2 9 Tf 332 702.5 Td (01) Tj ET BT /F1 16 Tf 300 700 Td (BA) Tj ET"),
+        &format!(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /FakeArabic /FirstChar 32 /LastChar 88 /Widths [{}] /ToUnicode 6 0 R >>",
+            widths.join(" ")
+        ),
+        &stream("", cmap),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+    ]);
+    let blocks = text::text_blocks(&doc, 0).unwrap();
+    let texts: Vec<_> = blocks.iter().map(|b| b.editor_text.as_str()).collect();
+    assert_eq!(blocks.len(), 2, "the number and the heading are separate paragraphs: {texts:?}");
+    assert!(texts.contains(&"01"), "{texts:?}");
+}
+
 /// A right-to-left row as browsers print it: the runs drawn from left to right, each letter
 /// with tanween in its own `/ActualText` cluster whose mark is drawn first and raised, and a
 /// bold Latin word between Arabic runs. It reads back as one row in typing order: the

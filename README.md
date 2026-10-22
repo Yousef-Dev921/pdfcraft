@@ -1,10 +1,5 @@
 <p align="center">
-  <a href="https://getartcraft.com/">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/brand/artcraft-logo-white.svg">
-      <img alt="ArtCraft" src="docs/brand/artcraft-logo.svg" width="200">
-    </picture>
-  </a>
+  <img alt="PdfCraft" src="assets/app-icon/pdfcraft-small.svg" width="96">
 </p>
 
 
@@ -591,7 +586,7 @@ part of this repository and PdfCraft, under [`docs/brand/LICENSE-brand.txt`](doc
 Forks and modified versions must remove them.
 
 <p align="center">
-  <a href="https://getartcraft.com/"><img alt="ArtCraft" src="docs/brand/artcraft-mark.svg" width="28"></a><br>
+  <img alt="PdfCraft" src="assets/app-icon/pdfcraft-small.svg" width="28"><br>
   <sub>Made by the <a href="https://getartcraft.com/">ArtCraft</a> team and community.</sub>
 </p>
 

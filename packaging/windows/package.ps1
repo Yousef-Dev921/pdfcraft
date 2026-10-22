@@ -11,16 +11,20 @@
   zip needs the Visual C++ redistributable. Signing is delegated to sign.ps1 (skipped with a
   warning when no signing secrets are set).
 
-  Needs: Rust (MSVC toolchain + the target), curl and the network (the OCR models), the Windows SDK (rc.exe, signtool.exe),
-  and WiX v5: dotnet tool install --global wix --version 5.0.2
+  Needs: Rust (MSVC toolchain + the target, or x64 GNU with MinGW-w64 on PATH), curl and the network
+  (the OCR models), a resource compiler (Windows SDK rc.exe, or MinGW windres.exe),
+  and WiX v5: dotnet tool install --global wix --version 5.0.2. Signing also needs signtool.exe.
+  GNU builds must statically link their compiler runtime; the package verifies their DLL imports.
 
 .EXAMPLE
   pwsh packaging/windows/package.ps1 -Arch x64
   pwsh packaging/windows/package.ps1 -Arch x86 -SkipBuild   # set CRAFT_FONTS_DIR, or -BuiltWithoutCraftFonts
   pwsh packaging/windows/package.ps1 -Arch arm64     # cross-compiled; needs the MSVC ARM64 build tools
+  pwsh packaging/windows/package.ps1 -Arch x64 -Toolchain gnu
 #>
 param(
   [ValidateSet('x64', 'x86', 'arm64')] [string] $Arch = 'x64',
+  [ValidateSet('msvc', 'gnu')] [string] $Toolchain = 'msvc',
   [switch] $SkipBuild,
   # -SkipBuild only: the existing binaries were built without CRAFT_FONTS_DIR, so they embed no
   # craft-fonts faces. Without CRAFT_FONTS_DIR this assertion is required: package.ps1 cannot
@@ -59,7 +63,10 @@ if (-not $Version) { throw 'could not read [workspace.package] version from Carg
 # MSI ProductVersion is numeric (major.minor.build); pre-release tags are dropped there.
 $MsiVersion = ($Version -split '-')[0]
 
-$Target = switch ($Arch) { 'x64' { 'x86_64-pc-windows-msvc' } 'x86' { 'i686-pc-windows-msvc' } 'arm64' { 'aarch64-pc-windows-msvc' } }
+if ($Toolchain -eq 'gnu' -and $Arch -ne 'x64') { throw 'GNU packaging supports x64 only; use -Toolchain msvc for x86 or arm64' }
+$Target = if ($Toolchain -eq 'gnu') { 'x86_64-pc-windows-gnu' } else {
+  switch ($Arch) { 'x64' { 'x86_64-pc-windows-msvc' } 'x86' { 'i686-pc-windows-msvc' } 'arm64' { 'aarch64-pc-windows-msvc' } }
+}
 $Dist = if ($env:DIST) { $env:DIST } else { Join-Path $Root 'dist\release' }
 $TargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $Root 'target' }
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
@@ -96,6 +103,13 @@ foreach ($check in @(@('pdfcraft.exe', 2), @('pdfcraft-cli.exe', 3))) {
   if ($h.Machine -ne $Machine) { throw "$($check[0]) is for machine 0x$('{0:X}' -f $h.Machine), expected 0x$('{0:X}' -f $Machine) ($Arch)" }
   if ($h.Subsystem -ne $check[1]) { throw "$($check[0]) has PE subsystem $($h.Subsystem), expected $($check[1])" }
   Write-Output "ok $($check[0]): $Arch, PE subsystem $($h.Subsystem)"
+}
+if ($Toolchain -eq 'gnu') {
+  # A release must run without the developer's MinGW bin directory on PATH. The MSI has no
+  # compiler-runtime DLL components, so reject a dynamically linked GCC runtime before staging.
+  Invoke-Native 'check GNU runtime imports' {
+    & (Join-Path $PSScriptRoot 'test-gnu-runtime.ps1') (Join-Path $Bin 'pdfcraft.exe') (Join-Path $Bin 'pdfcraft-cli.exe')
+  }
 }
 $Stage = Join-Path $TargetDir "windows-package\$Arch"
 Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue

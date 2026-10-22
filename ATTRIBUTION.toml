@@ -217,7 +217,7 @@ licence = "MIT OR Apache-2.0"
 licence_file = "LICENSE-MIT"
 kind = "translation"
 usage = "Arabic UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
-sha256 = "2306dbbe6a73671fd20df116adb159a7f66c85fbbd1bae5ecef5f6e882d6b7f1"
+sha256 = "5b8df3362508dcf9703abd3c8ec8d51084e00537c4f16b122138d4ad01036eb0"
 
 [[asset]]
 path = "crates/ui-egui/src/i18n/ckb.tsv"
@@ -228,7 +228,7 @@ licence = "MIT OR Apache-2.0"
 licence_file = "LICENSE-MIT"
 kind = "translation"
 usage = "Central Kurdish UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
-sha256 = "864db8aa0a5e443c92e7e388f89349eb0f0e7beda35a0b81695d864dcec51b72"
+sha256 = "11bdf314db7dbb4e1547e933a1e308e59f91e3918ca14dd89c097847acdc22dc"
 
 [[asset]]
 path = "crates/ui-egui/src/i18n/tr.tsv"

@@ -10,13 +10,20 @@ use unicode_bidi::ParagraphBidiInfo;
 const MAX_CHARS: usize = 65_536;
 const MAX_BYTES: usize = 262_144;
 
+/// A painted cluster: a glyph with visible Unicode and the empty-Unicode glyphs (marks,
+/// ligature parts) drawn right after it.
 struct Cluster {
     drawn: Vec<Drawn>,
+    /// Its Unicode, invisible format characters removed.
     unicode: String,
+    /// Where it starts along the baseline (the writing direction `u`).
     along: f64,
+    /// The span its advancing glyphs cover along the baseline.
     interval: [f64; 2],
 }
 
+/// A cluster matched to the logical characters it paints: `first..=last` are indices into the
+/// logical text's characters, and `glyph` is the cluster's geometry carrying that text.
 struct Mapped {
     first: usize,
     last: usize,
@@ -49,6 +56,7 @@ fn hanging(c: char) -> bool {
 /// Arabic letters are not matched by an arbitrary FIFO of equal strings. Their source character
 /// indices come from the complete Unicode bidi permutation, checked against the physical order.
 pub(super) fn precise(drawn: &[Drawn], logical: &str) -> Option<Vec<TextGlyph>> {
+    // 1. Refuse what this mapping can't prove: empty or oversized input, or a paragraph break.
     if logical.is_empty()
         || logical.len() > MAX_BYTES
         || drawn.len() > MAX_CHARS
@@ -61,6 +69,8 @@ pub(super) fn precise(drawn: &[Drawn], logical: &str) -> Option<Vec<TextGlyph>> 
     if chars.len() > MAX_CHARS {
         return None;
     }
+    // 2. One row: `u` is the writing direction and `across` its normal; every advancing glyph
+    // sits on the first one's baseline, to within 2% of its height.
     let first = drawn.iter().find(|d| d.3.is_some_and(|p| p.advances))?;
     let u = first.1;
     let across = [-u[1], u[0]];
@@ -82,6 +92,7 @@ pub(super) fn precise(drawn: &[Drawn], logical: &str) -> Option<Vec<TextGlyph>> 
             return None;
         }
     }
+    // 3. Group the glyphs, in drawing order, into clusters.
     let along = |g: &TextGlyph| f64::from(g.quad[0][0]) * u[0] + f64::from(g.quad[0][1]) * u[1];
     let mut clusters: Vec<Cluster> = Vec::new();
     for d in drawn {
@@ -101,6 +112,8 @@ pub(super) fn precise(drawn: &[Drawn], logical: &str) -> Option<Vec<TextGlyph>> 
     if clusters.is_empty() {
         return None;
     }
+    // 4. Each cluster's span along the baseline, from its advancing glyphs; then the clusters in
+    // physical order, as they sit along `u`.
     for c in &mut clusters {
         let mut low = f64::INFINITY;
         let mut high = f64::NEG_INFINITY;
@@ -137,6 +150,9 @@ pub(super) fn precise(drawn: &[Drawn], logical: &str) -> Option<Vec<TextGlyph>> 
             }
         }
     }
+    // 5. The logical text in visual order (UAX #9): `visual[k]` is the index of the character
+    // painted k-th. `ordinal` numbers the visible characters in logical order, so owners that are
+    // neighbours in the text have consecutive ordinals.
     let bidi = ParagraphBidiInfo::new(logical, None);
     let levels = bidi.reordered_levels_per_char(0..logical.len());
     let visual = ParagraphBidiInfo::reorder_visual(&levels);
@@ -145,6 +161,10 @@ pub(super) fn precise(drawn: &[Drawn], logical: &str) -> Option<Vec<TextGlyph>> 
     for (at, &i) in visible.iter().enumerate() {
         ordinal[i] = Some(at);
     }
+    // 6. Walk the clusters in physical order and give each the next `n` visible characters of the
+    // visual order as its owners. The owners must be neighbours in the logical text and spell the
+    // cluster's Unicode (a bracket at a right-to-left level may be painted mirrored). Characters
+    // from `omit_from` on are left out of the walk.
     let try_map = |omit_from: usize| -> Option<Vec<Mapped>> {
         let expected: Vec<_> = visual.iter().copied().filter(|&i| i < omit_from && !default_ignorable(chars[i].1)).collect();
         let mut cursor: usize = 0;
@@ -170,6 +190,8 @@ pub(super) fn precise(drawn: &[Drawn], logical: &str) -> Option<Vec<TextGlyph>> 
         }
         (cursor == expected.len()).then_some(mapped)
     };
+    // 7. Every character first; failing that, without the trailing spaces (and invisible
+    // characters) a producer may leave unpainted at the end of the line.
     let mut mapped = match try_map(chars.len()) {
         Some(mapped) => mapped,
         None => {
@@ -183,6 +205,9 @@ pub(super) fn precise(drawn: &[Drawn], logical: &str) -> Option<Vec<TextGlyph>> 
             try_map(suffix)?
         }
     };
+    // 8. Emit in logical order: each cluster's glyph; an invisible character between clusters as
+    // an empty glyph at the edge of the cluster it precedes; then the trailing invisible characters
+    // and hanging spaces at the line's reading end. The result must spell `logical` exactly.
     mapped.sort_by_key(|m| m.first);
     let last_logical = mapped.last()?.last;
     let mut out: Vec<TextGlyph> = Vec::new();

@@ -24,6 +24,24 @@ release-pinned craft-fonts checkout. The additional tests are `text_layout::bidi
 `widgets::text_edit::bidi_tests`; the latter drives real keyboard, pointer, clipboard, IME and
 accessibility events. The surrounding interface layout is still not mirrored.
 
+Unlike the small patches above, these two carry a layout engine of their own, so re-syncing them
+with a later egui 0.36.x is a port rather than a re-apply. A diff of these directories against the
+published 0.36.2 crates shows all of it:
+- new files: `epaint/src/text/text_layout/bidi.rs` (the layout) and
+  `egui/src/widgets/text_edit/bidi_tests.rs`;
+- hooks marked `PdfCraft patch:` in `epaint/src/text/{text_layout,text_layout_types}.rs`,
+  `epaint/src/shapes/text_shape.rs`, `egui/src/text_selection/{accesskit_text,cursor_range,visuals}.rs`
+  and `egui/src/widgets/text_edit/builder.rs`, plus `mod bidi_tests` in `text_edit/mod.rs`;
+- `Cargo.toml`: `unicode-bidi` for epaint, and egui's `epaint` dependency pointed at `../epaint`;
+- no behaviour change: doc examples that included the crates' own images (not vendored) now
+  include `assets/app-icon/pdfcraft-small.svg`, `#[expect(clippy::…)]` attributes that this
+  workspace's lint set doesn't trigger are comments, and the code is formatted with this
+  repository's `rustfmt.toml`.
+
+To port: replace both directories with the new published crates, record their SHA-256s here,
+carry the two new files over, re-apply the marked hooks and the `Cargo.toml` lines against the new
+code, then run the two regression commands above and `cargo test -p pdfcraft-ui-egui`.
+
 A PdfCraft patch in `hayro-syntax::Page::base_dimensions` expresses the existing one-point floor as a raw reciprocal of `/UserUnit`, rounded upward only when f32 multiplication would fall below one point. Five `pdfcraft-render` regressions with prefix `raster::tests::raw_crop_` cover the observed dimensions, origins and rotations, units 41/47, bounded vector rasters and unchanged nearly-zero A4 fallback. Accepted page-unit policy and licences are unchanged.
 
 In `hayro-interpret`, Type 3 glyph bounding boxes are transformed to device space before intersecting clip and shading bounds; `raster::tests::shaded_type3_glyph_draws_at_multiple_positions` covers translated glyphs (#3178).

@@ -1,0 +1,51 @@
+name: Personal macOS build
+
+# A personal, unsigned build of this branch for macOS (Apple silicon and Intel). Not a release:
+# the app is ad-hoc signed and not notarized, so the first launch needs right-click > Open.
+on:
+  push:
+    branches: [local/yousef-build-v3-mac]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 150
+    env:
+      PDFCRAFT_VERSION: 0.14.0-yousef-rtl
+      CRAFT_FONTS_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: storytold/craft-fonts
+          ref: b076417b5880bd4154bd22f00695b1d28c6bea83
+          path: craft-fonts
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --target aarch64-apple-darwin,x86_64-apple-darwin
+          rustup default stable
+          cargo --version
+      - name: Build
+        env:
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          PDFCRAFT_BUILD_LABEL: Yousef RTL
+        run: cargo build --release --locked -p pdfcraft -p pdfcraft-cli --target aarch64-apple-darwin --target x86_64-apple-darwin
+      - name: Package
+        env:
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+        run: packaging/macos/package.sh --arch universal --skip-build
+      - name: Check the CLI version
+        run: |
+          set -euo pipefail
+          cli="target/macos-package/bin/pdfcraft-cli"
+          "$cli" --version
+          "$cli" --version | grep -q '0.14.0 (Yousef RTL)'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pdfcraft-0.14.0-yousef-rtl-macos
+          path: dist/release/*
+          if-no-files-found: error

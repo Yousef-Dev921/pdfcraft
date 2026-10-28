@@ -106,6 +106,7 @@ impl PdfCraftApp {
             pinned: Default::default(),
             toast: None,
             integrated_titlebar: false,
+            titlebar_lights_right: None,
             window_controls: None,
             system_title_bar: false,
             app_frame_shown: None,

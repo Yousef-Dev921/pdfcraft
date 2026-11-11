@@ -11587,11 +11587,11 @@ fn thai_text_through_tools_saves_reopens_extracts_and_renders() {
     assert!(page_text(&mut a, reopened)[0].contains("แก้ไข น้ำ"));
 }
 
-/// Add text in Russian, Greek, Chinese, Japanese, Korean and Hindi was refused ("only Western
-/// European characters can be added as text for now") though PdfCraft bundles a face for each:
-/// Inter for Cyrillic and Greek, the craft-fonts CJK, Korean and Devanagari faces. Each is now
-/// drawn with its face, saved, reopened, found as typed and retyped. A build without a face still
-/// refuses its script, saying which font it needs.
+/// Add text in Russian, Greek, Chinese, Japanese, Korean, Hindi and Dhivehi was refused ("only
+/// Western European characters can be added as text for now") though PdfCraft bundles a face for
+/// each: Inter for Cyrillic and Greek, the craft-fonts CJK, Korean, Devanagari and Thaana faces.
+/// Each is now drawn with its face, saved, reopened, found as typed and retyped. A build without a
+/// face still refuses its script, saying which font it needs.
 #[test]
 fn text_in_scripts_with_a_bundled_face_is_added_saved_and_found() {
     let dir = workdir("other-scripts");
@@ -11604,6 +11604,7 @@ fn text_in_scripts_with_a_bundled_face_is_added_saved_and_found() {
         ("四半期報告は安定した成長を示す。", "新しいテキスト", pdfcraft_fonts::ShapedScript::Japanese.font().is_some()),
         ("분기 보고서 2026", "새 텍스트", pdfcraft_fonts::ShapedScript::Korean.font().is_some()),
         ("त्रैमासिक रिपोर्ट", "नया पाठ", pdfcraft_fonts::ShapedScript::Devanagari.font().is_some()),
+        ("ދިވެހި ބަސް", "ބަސް ދިވެހި", pdfcraft_fonts::ShapedScript::Thaana.font().is_some()),
     ];
     let mut added = 0;
     for (text, retyped, face) in samples {

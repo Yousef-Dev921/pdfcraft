@@ -49,8 +49,8 @@ pub(super) fn wrapped(t: &AddedText) -> Vec<(String, bool, usize)> {
     let mut out = Vec::new();
     let han = pdfcraft_fonts::han_script(&t.text);
     for (index, para) in t.text.split('\n').enumerate() {
-        // Arabic or Hebrew: laid out with the bidirectional algorithm and shaped.
-        let rtl_script = para.chars().any(|c| is_arabic(c) || is_hebrew(c));
+        // Arabic, Hebrew or Thaana: laid out with the bidirectional algorithm and shaped.
+        let rtl_script = para.chars().any(|c| is_arabic(c) || is_hebrew(c) || is_thaana(c));
         let thai = para.chars().any(is_thai);
         let controls = para.chars().any(pdfcraft_fonts::embedding::default_ignorable) || para.chars().any(|c| other_script(c, han).is_some());
         if thai
@@ -197,6 +197,12 @@ pub(super) fn is_arabic(c: char) -> bool {
     matches!(u32::from(c), 0x0600..=0x06FF | 0x0750..=0x077F | 0x0870..=0x08FF | 0xFB50..=0xFDFF | 0xFE70..=0xFEFC)
 }
 
+/// Thaana letters, fili and sukun: an item with any of them is drawn with the craft-fonts Thaana
+/// face. Outside [`is_arabic`], which stops at U+077F, though Thaana is right-to-left like it.
+pub(super) fn is_thaana(c: char) -> bool {
+    matches!(u32::from(c), 0x0780..=0x07B1)
+}
+
 /// Hebrew letters, points, cantillation marks and punctuation (and the presentation forms): an
 /// item with any of them is drawn with the craft-fonts Hebrew face.
 pub(super) fn is_hebrew(c: char) -> bool {
@@ -204,16 +210,17 @@ pub(super) fn is_hebrew(c: char) -> bool {
 }
 
 /// A character drawn with a bundled face of another script than Arabic, Hebrew and Thai:
-/// Devanagari (the craft-fonts `Deva` face), Cyrillic, Greek and Latin letters outside
-/// WinAnsiEncoding (the bundled Inter), Han and kana (the Japanese face, or the Simplified Chinese
-/// one for Chinese text: `han`, [`pdfcraft_fonts::han_script`] of the item's whole text, worked out
-/// once per item) and Hangul (the `Kore` face). Characters WinAnsiEncoding has stay in the item's
-/// own font.
+/// Thaana (the craft-fonts `Thaa` face), Devanagari (the `Deva` face), Cyrillic, Greek and Latin
+/// letters outside WinAnsiEncoding (the bundled Inter), Han and kana (the Japanese face, or the
+/// Simplified Chinese one for Chinese text: `han`, [`pdfcraft_fonts::han_script`] of the item's
+/// whole text, worked out once per item) and Hangul (the `Kore` face). Characters WinAnsiEncoding
+/// has stay in the item's own font.
 pub(super) fn other_script(c: char, han: ShapedScript) -> Option<ShapedScript> {
     if pdfcraft_fonts::win_ansi_encodable(c) {
         return None;
     }
     Some(match u32::from(c) {
+        0x0780..=0x07B1 => ShapedScript::Thaana,
         0x0900..=0x097F | 0xA8E0..=0xA8FF => ShapedScript::Devanagari,
         0x1100..=0x11FF | 0x3130..=0x318F | 0xA960..=0xA97F | 0xAC00..=0xD7AF => ShapedScript::Korean,
         0x3040..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9F => ShapedScript::Japanese,
@@ -332,9 +339,9 @@ pub(super) fn shaped_layout_bidi(t: &AddedText, line: &str, info: &ParagraphBidi
         let run_rtl = levels.get(run.start).is_some_and(Level::is_rtl);
         // Runs lie on character boundaries; a missing slice is skipped, never a panic.
         let Some(text) = line.get(run) else { continue };
-        // Arabic and Hebrew letters take their face; so do spaces and punctuation between them
-        // (Hebrew's when they follow Hebrew), which the shaper then mirrors. Latin text (and what
-        // the faces lack) keeps the item's font.
+        // Arabic, Hebrew and Thaana letters take their face; so do spaces and punctuation between
+        // them (Hebrew's and Thaana's when they follow their own script), which the shaper then
+        // mirrors. Latin text (and what the faces lack) keeps the item's font.
         let mut segments: Vec<(Option<ShapedScript>, String)> = Vec::new();
         let first_script = text.chars().find_map(|c| {
             if is_arabic(c) {
@@ -358,10 +365,13 @@ pub(super) fn shaped_layout_bidi(t: &AddedText, line: &str, info: &ParagraphBidi
                 continue;
             }
             let after_hebrew = segments.last().is_some_and(|(kind, _)| *kind == Some(ShapedScript::Hebrew));
+            let after_thaana = segments.last().is_some_and(|(kind, _)| *kind == Some(ShapedScript::Thaana));
             let script = if is_thai(c) {
                 Some(ShapedScript::Thai)
             } else if is_hebrew(c) || (run_rtl && after_hebrew && !c.is_alphanumeric() && pdfcraft_fonts::hebrew_has(c)) {
                 Some(ShapedScript::Hebrew)
+            } else if is_thaana(c) || (run_rtl && after_thaana && !c.is_alphanumeric() && pdfcraft_fonts::script_has(ShapedScript::Thaana, c)) {
+                Some(ShapedScript::Thaana)
             } else if is_arabic(c) || (run_rtl && !c.is_alphanumeric() && pdfcraft_fonts::arabic_has(c)) {
                 Some(ShapedScript::Arabic)
             } else {

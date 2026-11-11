@@ -41,6 +41,8 @@ pub enum ShapedScript {
     Chinese,
     /// Hangul, with the craft-fonts `Kore` face (Nanum Gothic).
     Korean,
+    /// Thaana, with the craft-fonts `Thaa` face (Noto Sans Thaana).
+    Thaana,
 }
 
 impl ShapedScript {
@@ -59,6 +61,7 @@ impl ShapedScript {
                 hans().find(|f| f.family.contains("Sans")).or_else(|| hans().find(|f| f.style == "Regular")).or_else(|| hans().next())
             }
             Self::Korean => crate::CRAFT_FONTS.iter().find(|f| f.covers("Kore")),
+            Self::Thaana => crate::CRAFT_FONTS.iter().find(|f| f.covers("Thaa")),
         }
     }
 
@@ -73,6 +76,7 @@ impl ShapedScript {
             Self::Japanese => "Japanese",
             Self::Chinese => "Chinese",
             Self::Korean => "Korean",
+            Self::Thaana => "Thaana",
         }
     }
 }
@@ -107,6 +111,7 @@ fn face(script: ShapedScript) -> Option<&'static (FontRef<'static>, ShaperData)>
     static JAPANESE: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
     static CHINESE: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
     static KOREAN: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
+    static THAANA: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
     let cache = match script {
         ShapedScript::Arabic | ShapedScript::ArabicBold => &FACE,
         ShapedScript::Hebrew => &HEBREW,
@@ -116,6 +121,7 @@ fn face(script: ShapedScript) -> Option<&'static (FontRef<'static>, ShaperData)>
         ShapedScript::Japanese => &JAPANESE,
         ShapedScript::Chinese => &CHINESE,
         ShapedScript::Korean => &KOREAN,
+        ShapedScript::Thaana => &THAANA,
     };
     cache
         .get_or_init(|| {
@@ -213,6 +219,7 @@ fn shape_script(text: &str, rtl: bool, kind: ShapedScript) -> Result<Vec<ShapedC
         ShapedScript::Thai => buffer.set_script(script::THAI),
         ShapedScript::Devanagari => buffer.set_script(script::DEVANAGARI),
         ShapedScript::Korean => buffer.set_script(script::HANGUL),
+        ShapedScript::Thaana => buffer.set_script(script::THAANA),
         ShapedScript::Japanese | ShapedScript::Chinese => buffer.set_script(script::HAN),
         // Cyrillic, Greek or Latin: the shaper reads it from the text.
         ShapedScript::Latin => buffer.guess_segment_properties(),

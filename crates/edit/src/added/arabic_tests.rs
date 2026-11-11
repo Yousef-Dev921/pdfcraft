@@ -520,6 +520,33 @@ fn vocalized_added_text_ink_fits_its_reported_height_after_drawing() {
     assert!(checked > 0);
 }
 
+/// Dhivehi is right-to-left, but its letters (U+0780..=U+07B1) are outside `is_arabic`, which stops
+/// at U+077F. The paragraph must still take an RTL base direction, and the space between two Thaana
+/// words must stay in the Thaana run: the Arabic catch-all for neutrals in an RTL run would
+/// otherwise draw it with the Arabic face.
+#[test]
+fn thaana_added_text_is_right_to_left_and_keeps_its_own_spaces() {
+    if pdfcraft_fonts::ShapedScript::Thaana.font().is_none() {
+        return;
+    }
+    let text = "ދިވެހި ބަސް";
+    let t = AddedText { text: text.into(), ..item() };
+    assert_eq!(first_undrawable(&t), None, "the Thaana face draws every character");
+    let lines = wrapped(&t);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].1, "a Thaana paragraph must be laid out right-to-left");
+    let (pieces, _) = shaped_layout(&t, text, true).unwrap();
+    assert!(!pieces.is_empty());
+    for piece in &pieces {
+        match piece {
+            Piece::Shaped(clusters) => {
+                assert!(clusters.iter().all(|c| c.script == ShapedScript::Thaana), "a Thaana character was drawn with another face: {clusters:?}")
+            }
+            Piece::Latin(s) => panic!("Thaana text fell to the item's own font: {s:?}"),
+        }
+    }
+}
+
 /// Thai is drawn by the shaped writer, whose rows grow for stacked marks (a vowel above with a
 /// tone mark over it); the box reported for the item is as tall as the rows it draws, so
 /// selection, hit testing and the resize handles cover the ink.

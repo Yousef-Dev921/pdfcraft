@@ -11591,7 +11591,8 @@ fn thai_text_through_tools_saves_reopens_extracts_and_renders() {
 /// Western European characters can be added as text for now") though PdfCraft bundles a face for
 /// each: Inter for Cyrillic and Greek, the craft-fonts CJK, Korean, Devanagari and Thaana faces.
 /// Each is now drawn with its face, saved, reopened, found as typed and retyped. A build without a
-/// face still refuses its script, saying which font it needs.
+/// face refuses the text with the standard-fonts message, naming the character it could not draw;
+/// it does not name the missing face.
 #[test]
 fn text_in_scripts_with_a_bundled_face_is_added_saved_and_found() {
     let dir = workdir("other-scripts");
@@ -11610,7 +11611,10 @@ fn text_in_scripts_with_a_bundled_face_is_added_saved_and_found() {
     for (text, retyped, face) in samples {
         let args = json!({"doc": doc, "page": 1, "text": text, "at": [10, 20 + 30 * added], "size": 12});
         if !face {
-            assert!(a.call("page_add_text", &args).unwrap_err().to_string().contains("font"), "{text}");
+            let c = text.chars().next().unwrap();
+            let msg = a.call("page_add_text", &args).unwrap_err().to_string();
+            assert!(msg.contains(&format!("\"{c}\" (U+{:04X})", u32::from(c))), "{text}: {msg}");
+            assert!(msg.contains("only Western European characters can be added as text for now"), "{text}: {msg}");
             continue;
         }
         ok(&mut a, "page_add_text", args);

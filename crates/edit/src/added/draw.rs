@@ -1,5 +1,5 @@
 use super::layout::{
-    Piece, arabic_error, hebrew_error, is_arabic, is_hebrew, is_thai, latin_width, line_extents, norm, other_script, script_error,
+    Piece, arabic_error, hebrew_error, is_arabic, is_hebrew, is_thai, latin_width, line_extents, norm, other_script, rtl_paragraph, script_error,
     shaped_layout_bidi, text_rect, thai_error, wrapped,
 };
 use super::types::{AddedText, Align, Family, Ink};
@@ -42,8 +42,7 @@ pub(super) fn laid_lines(t: &AddedText) -> Result<Vec<LaidLine>, EditError> {
     let mut fragments = wrapped(t).into_iter();
     let mut laid = Vec::new();
     for (paragraph_index, paragraph) in t.text.split('\n').enumerate() {
-        let rtl =
-            paragraph.chars().any(|c| is_arabic(c) || is_hebrew(c)) && unicode_bidi::get_base_direction(paragraph) == unicode_bidi::Direction::Rtl;
+        let rtl = rtl_paragraph(paragraph);
         let bidi = ParagraphBidiInfo::new(paragraph, Some(if rtl { Level::rtl() } else { Level::ltr() }));
         let mut start = 0usize;
         loop {

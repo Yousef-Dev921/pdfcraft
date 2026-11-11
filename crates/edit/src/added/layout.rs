@@ -61,7 +61,7 @@ pub(super) fn wrapped(t: &AddedText) -> Vec<(String, bool, usize)> {
             out.extend(lines.into_iter().map(|line| (line, false, index)));
             continue;
         }
-        let rtl = rtl_script && unicode_bidi::get_base_direction(para) == unicode_bidi::Direction::Rtl;
+        let rtl = rtl_paragraph(para);
         // Keep logical characters intact while finding line breaks. Measure each candidate with
         // the same shaper used to draw it: Arabic joining forms can change at the new line end.
         // Overwide words break only at grapheme boundaries, keeping vowel marks with their base.
@@ -201,6 +201,15 @@ pub(super) fn is_arabic(c: char) -> bool {
 /// face. Outside [`is_arabic`], which stops at U+077F, though Thaana is right-to-left like it.
 pub(super) fn is_thaana(c: char) -> bool {
     matches!(u32::from(c), 0x0780..=0x07B1)
+}
+
+/// Whether a paragraph is laid out right to left: it has a script of ours that reads that way and
+/// its first strong character is right-to-left. Measuring and drawing must agree, so both call
+/// this — a paragraph forced to an LTR base still resolves its internal RTL runs, which hides the
+/// disagreement until a line mixes scripts.
+pub(super) fn rtl_paragraph(paragraph: &str) -> bool {
+    paragraph.chars().any(|c| is_arabic(c) || is_hebrew(c) || is_thaana(c))
+        && unicode_bidi::get_base_direction(paragraph) == unicode_bidi::Direction::Rtl
 }
 
 /// Hebrew letters, points, cantillation marks and punctuation (and the presentation forms): an

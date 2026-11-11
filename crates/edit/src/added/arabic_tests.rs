@@ -520,6 +520,172 @@ fn vocalized_added_text_ink_fits_its_reported_height_after_drawing() {
     assert!(checked > 0);
 }
 
+/// Dhivehi is right-to-left, but its letters (U+0780..=U+07B1) are outside `is_arabic`, which stops
+/// at U+077F. The paragraph must still take an RTL base direction, and the space between two Thaana
+/// words must stay in the Thaana run: the Arabic catch-all for neutrals in an RTL run would
+/// otherwise draw it with the Arabic face.
+#[test]
+fn thaana_added_text_is_right_to_left_and_keeps_its_own_spaces() {
+    if pdfcraft_fonts::ShapedScript::Thaana.font().is_none() {
+        return;
+    }
+    let text = "ދިވެހި ބަސް";
+    let t = AddedText { text: text.into(), ..item() };
+    assert_eq!(first_undrawable(&t), None, "the Thaana face draws every character");
+    let lines = wrapped(&t);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].1, "a Thaana paragraph must be laid out right-to-left");
+    let (pieces, _) = shaped_layout(&t, text, true).unwrap();
+    assert!(!pieces.is_empty());
+    for piece in &pieces {
+        match piece {
+            Piece::Shaped(clusters) => {
+                assert!(clusters.iter().all(|c| c.script == ShapedScript::Thaana), "a Thaana character was drawn with another face: {clusters:?}")
+            }
+            Piece::Latin(s) => panic!("Thaana text fell to the item's own font: {s:?}"),
+        }
+    }
+}
+
+/// The drawing path decides paragraph direction again in `laid_lines`, separately from `wrapped`,
+/// and both must reach the same answer. A paragraph forced to an LTR base still resolves its
+/// internal RTL runs, so a pure-Thaana line looks right either way: only a mixed line shows the
+/// difference, and only when its first strong character is right-to-left. The Latin-first case is
+/// the control — it must stay left-to-right, so the fix cannot simply force every Thaana item RTL.
+#[test]
+fn thaana_drawing_uses_the_same_paragraph_direction_as_measuring() {
+    if !thaana_face_or_skip() {
+        return;
+    }
+    // Digits are weak bidi characters: the first following strong character chooses the base.
+    // Expected directions are literal test data, not recomputed with the helper under test.
+    for (text, rtl) in
+        [("ދިވެހި ބަސް", true), ("ދިވެހި ބަސް 2026 PDF", true), ("PDF 2026 ދިވެހި ބަސް", false), ("2026 ދިވެހި ބަސް PDF", true), ("2026 PDF ދިވެހި ބަސް", false)]
+    {
+        let t = AddedText { text: text.into(), ..item() };
+        let laid = laid_lines(&t).unwrap();
+        assert_eq!(laid.len(), 1, "{text}: {laid:?}");
+        assert_eq!(laid[0].1, rtl, "{text}: drawing chose the wrong paragraph base");
+        let (_, measured, _) = wrapped(&t)[0].clone();
+        assert_eq!(measured, rtl, "{text}: measuring chose the wrong paragraph base");
+        let drawn: String = laid[0].3.iter().map(piece_text).collect();
+        let (expected, _) = shaped_layout(&t, &laid[0].0, rtl).unwrap();
+        let expected: String = expected.iter().map(piece_text).collect();
+        assert_eq!(drawn, expected, "{text}: drawing ordered the runs against the wrong base");
+    }
+}
+
+/// This oracle does not shape a second copy: the original failing line must draw these runs in
+/// this concrete left-to-right order, however measuring and drawing decide their direction.
+#[test]
+fn thaana_mixed_line_draws_latin_then_digits_then_thaana() {
+    if !thaana_face_or_skip() {
+        return;
+    }
+    let t = AddedText { text: "ދިވެހި ބަސް 2026 PDF".into(), ..item() };
+    let laid = laid_lines(&t).unwrap();
+    assert_eq!(laid.len(), 1);
+    assert_run_order(&laid[0].3, ["PDF", "2026", "Thaana"]);
+}
+
+/// A later line beginning with Latin still belongs to the original RTL paragraph. Its mixed
+/// runs must use that paragraph's resolved levels, not a fresh LTR context for the line alone.
+#[test]
+fn thaana_wrapped_lines_keep_the_full_paragraph_base() {
+    if !thaana_face_or_skip() {
+        return;
+    }
+    let prefix = "ދިވެހި".repeat(8);
+    let tail = "PDF 2026 ބަސް";
+    let mut t = AddedText { text: format!("{prefix} {tail}"), ..item() };
+    // Fit exactly the first word using this face's metrics, not a screen pixel constant. The
+    // short mixed tail fits on the next line, where its own first strong character is Latin.
+    let width = shaped_width(&t, &prefix, true) + 0.01;
+    assert!(shaped_width(&t, tail, true) < width);
+    t.rect[2] = t.rect[0] + width;
+    let laid = laid_lines(&t).unwrap();
+    assert_eq!(laid.len(), 2, "{laid:?}");
+    assert_eq!(laid[0].0.trim_end(), prefix);
+    assert_eq!(laid[1].0, tail);
+    assert!(laid.iter().all(|(_, rtl, paragraph, _, _)| *rtl && *paragraph == 0));
+    assert_eq!(laid.iter().map(|(text, ..)| text.as_str()).collect::<String>(), t.text);
+    assert_run_order(&laid[1].3, ["Thaana", "PDF", "2026"]);
+}
+
+#[test]
+fn thaana_direction_resets_at_each_paragraph() {
+    if !thaana_face_or_skip() {
+        return;
+    }
+    let rtl = "ދިވެހި ބަސް 2026 PDF";
+    let ltr = "PDF 2026 ދިވެހި ބަސް";
+    let t = AddedText { text: format!("{rtl}\n{ltr}\n{rtl}"), ..item() };
+    let laid = laid_lines(&t).unwrap();
+    assert_eq!(laid.len(), 3);
+    for (index, (expected_text, expected_rtl, order)) in
+        [(rtl, true, ["PDF", "2026", "Thaana"]), (ltr, false, ["PDF", "2026", "Thaana"]), (rtl, true, ["PDF", "2026", "Thaana"])]
+            .into_iter()
+            .enumerate()
+    {
+        assert_eq!(laid[index].0, expected_text);
+        assert_eq!(laid[index].1, expected_rtl, "paragraph {index}");
+        assert_eq!(laid[index].2, index);
+        assert_run_order(&laid[index].3, order);
+    }
+}
+
+/// Direction selection is independently testable even in builds with no bundled faces.
+#[test]
+fn rtl_paragraph_uses_the_first_strong_character_of_supported_scripts() {
+    for (text, expected) in [
+        ("ދިވެހި ބަސް", true),
+        ("ދިވެހި ބަސް 2026 PDF", true),
+        ("PDF 2026 ދިވެހި ބަސް", false),
+        ("2026 ދިވެހި ބަސް PDF", true),
+        ("2026 PDF ދިވެހި ބަސް", false),
+        ("مرحبا PDF", true),
+        ("PDF مرحبا", false),
+        ("שלום PDF", true),
+        ("PDF שלום", false),
+        ("2026 PDF", false),
+        ("2026", false),
+        ("", false),
+    ] {
+        assert_eq!(super::layout::rtl_paragraph(text), expected, "{text:?}");
+    }
+}
+
+fn thaana_face_or_skip() -> bool {
+    if ShapedScript::Thaana.font().is_none() {
+        eprintln!("skipping Thaana drawing check: no bundled Thaa face (set CRAFT_FONTS_DIR)");
+        return false;
+    }
+    true
+}
+
+/// Compare token positions without reversing scalar values or splitting a shaped cluster's
+/// fili from its base. The expected order is literal test data, not another bidi computation.
+fn assert_run_order(pieces: &[Piece], expected: [&str; 3]) {
+    let drawn: String = pieces.iter().map(piece_text).collect();
+    let positions = expected.map(|token| {
+        if token == "Thaana" {
+            drawn.char_indices().find_map(|(at, c)| (0x0780..=0x07B1).contains(&u32::from(c)).then_some(at))
+        } else {
+            drawn.find(token)
+        }
+        .unwrap_or_else(|| panic!("missing {token} in {drawn:?}"))
+    });
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "expected {expected:?}, got token positions {positions:?} in {drawn:?}");
+}
+
+/// A piece's characters in drawing order, whichever face draws them.
+fn piece_text(p: &Piece) -> String {
+    match p {
+        Piece::Shaped(clusters) => clusters.iter().map(|c| c.text.clone()).collect(),
+        Piece::Latin(s) => s.clone(),
+    }
+}
+
 /// Thai is drawn by the shaped writer, whose rows grow for stacked marks (a vowel above with a
 /// tone mark over it); the box reported for the item is as tall as the rows it draws, so
 /// selection, hit testing and the resize handles cover the ink.
